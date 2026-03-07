@@ -1,5 +1,10 @@
 """
 Warren Bot V4 - Full Python ICT Trading & Grup Yonetim Botu
+- Twelve Data API ile gercek zamanli fiyat verisi
+- ICT sinyal tarama
+- Claude AI ile gunluk HTF analiz (sabah 09:00 TR saati)
+- Telegram grup yonetimi
+- 7/24 Render.com'da calisir
 """
 
 import os
@@ -21,10 +26,12 @@ from telegram.ext import (
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-TG_TOKEN   = os.environ.get("TG_TOKEN",   "8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w")
-TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "-1003838635441")
-TD_API_KEY = os.environ.get("TD_API_KEY", "YOUR_TWELVEDATA_KEY")
-ADMIN_IDS  = [6663913960]
+# ── AYARLAR ─────────────────────────────────────────────────
+TG_TOKEN      = os.environ.get("TG_TOKEN",      "8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w")
+TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
+TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
+CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
+ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
     "XAU/USD": {"name": "Gold",   "interval": "1min"},
@@ -38,13 +45,14 @@ MIN_RR          = 2.0
 OB_LOOKBACK     = 20
 SIGNAL_INTERVAL = 60
 
-stats           = {"total": 0, "win": 0, "loss": 0}
-warnings_db     = {}
-message_counts  = {}
-last_signal_time= {}
-bot_active      = True
+stats            = {"total": 0, "win": 0, "loss": 0}
+warnings_db      = {}
+message_counts   = {}
+last_signal_time = {}
+bot_active       = True
+last_daily_analiz= None  # Son gunluk analiz tarihi
 
-# ── Keep Alive ──────────────────────────────────────────────
+# ── KEEP ALIVE ───────────────────────────────────────────────
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
@@ -54,7 +62,7 @@ class KeepAlive(BaseHTTPRequestHandler):
 def start_server():
     HTTPServer(("0.0.0.0", 8080), KeepAlive).serve_forever()
 
-# ── Twelve Data ─────────────────────────────────────────────
+# ── TWELVE DATA ──────────────────────────────────────────────
 def get_candles(symbol, interval="1min", outputsize=50):
     try:
         r = requests.get("https://api.twelvedata.com/time_series", params={
@@ -79,7 +87,186 @@ def get_price(symbol):
         return float(r.json().get("price", 0)) or None
     except: return None
 
-# ── ICT Analiz ──────────────────────────────────────────────
+def get_daily_candles(symbol, outputsize=30):
+    """Gunluk mum verileri - HTF analiz icin"""
+    try:
+        r = requests.get("https://api.twelvedata.com/time_series", params={
+            "symbol": symbol, "interval": "1day",
+            "outputsize": outputsize, "apikey": TD_API_KEY
+        }, timeout=10)
+        data = r.json()
+        if "values" not in data: return None
+        df = pd.DataFrame(data["values"])
+        df = df.rename(columns={"datetime":"time","open":"o","high":"h","low":"l","close":"c"})
+        df = df.astype({"o": float, "h": float, "l": float, "c": float})
+        return df.iloc[::-1].reset_index(drop=True)
+    except: return None
+
+# ── CLAUDE AI - GUNLUK ANALİZ ───────────────────────────────
+def get_market_context():
+    """Claude'a verilecek piyasa verilerini hazirla"""
+    context = {}
+    for symbol in ["XAU/USD", "QQQ", "EUR/USD"]:
+        price = get_price(symbol)
+        daily = get_daily_candles(symbol, 10)
+        if price and daily is not None:
+            son5 = daily.tail(5)
+            highs = son5["h"].values
+            lows  = son5["l"].values
+            closes= son5["c"].values
+            trend = "Uptrend" if closes[-1] > closes[0] else "Downtrend"
+            context[symbol] = {
+                "price":  price,
+                "trend":  trend,
+                "high5":  round(float(max(highs)), 4),
+                "low5":   round(float(min(lows)), 4),
+                "close":  round(float(closes[-1]), 4),
+            }
+    return context
+
+def generate_daily_analysis(symbol_display, context_data):
+    """Claude API ile gunluk HTF analiz olustur"""
+    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+        return None
+
+    now_tr = datetime.utcnow() + timedelta(hours=3)
+    tarih  = now_tr.strftime("%d %B %Y - %A")
+
+    # Piyasa verisini stringe cevir
+    piyasa_str = ""
+    for sym, data in context_data.items():
+        piyasa_str += f"{sym}: Fiyat={data['price']}, Trend={data['trend']}, 5gun High={data['high5']}, 5gun Low={data['low5']}\n"
+
+    prompt = f"""Sen bir ICT (Inner Circle Trader) piyasa analiz botusun. Asagidaki verilere gore {symbol_display} icin bugun ({tarih}) gunluk HTF analiz yaz.
+
+MEVCUT PIYASA VERILERI:
+{piyasa_str}
+
+ONEMLI: Sinyal botu degilsin.
+- "XYZ fiyatindan LONG AL" deme
+- "Kesin kazanc" deme
+- HTF bias + seviyeler + nedenlerini acikla
+- Kullanici kendi kararini versin
+
+Asagidaki FORMATTA Turkce analiz yaz (emojileri kullan):
+
+📊 {symbol_display} - HTF ANALIZ
+📅 {tarih}
+━━━━━━━━━━━━━━━━━━━━━━
+📈 YAPISAL ANALIZ
+━━━━━━━━━━━━━━━━━━━━━━
+🔹 DAILY STRUCTURE: [analiz]
+🔹 WEEKLY STRUCTURE: [analiz]
+🔹 MONTHLY: [analiz]
+━━━━━━━━━━━━━━━━━━━━━━
+🧭 KURUMSAL YONELIM
+━━━━━━━━━━━━━━━━━━━━━━
+📊 COT ANALIZI: [analiz]
+📅 QUARTERLY: [analiz]
+━━━━━━━━━━━━━━━━━━━━━━
+🎯 BUGUNKU BIAS
+━━━━━━━━━━━━━━━━━━━━━━
+➡️ GENEL YONELIM: [BULLISH / BEARISH / NEUTRAL]
+Neden? [3 sebep]
+━━━━━━━━━━━━━━━━━━━━━━
+🔍 DIKKAT EDILECEK SEVIYELER
+━━━━━━━━━━━━━━━━━━━━━━
+[Bias'a gore LONG veya SHORT zone'lari]
+📍 ZONE 1: [aralik]
+• Yapi: [OB/FVG/Breaker]
+• Konum: [Premium/Discount]
+• Nedeni: [aciklama]
+⚠️ Invalid: [seviye] body close
+📍 ZONE 2: [aralik]
+[ayni format]
+━━━━━━━━━━━━━━━━━━━━━━
+🎯 LIKIDITE HEDEFLER
+━━━━━━━━━━━━━━━━━━━━━━
+1️⃣ [hedef 1]
+2️⃣ [hedef 2]
+3️⃣ [hedef 3]
+━━━━━━━━━━━━━━━━━━━━━━
+⏰ ZAMANLAMALAR
+━━━━━━━━━━━━━━━━━━━━━━
+🕐 KILL ZONES (TR Saati):
+• 10:00-11:00 → London Silver Bullet
+• 13:30-14:00 → NY Open
+• 16:00-17:00 → NY Silver Bullet
+📊 MACRO SAATLERI: 09:50-10:10 / 10:50-11:10 / 13:50-14:10 / 14:50-15:10
+━━━━━━━━━━━━━━━━━━━━━━
+📌 OZEL NOTLAR
+━━━━━━━━━━━━━━━━━━━━━━
+⚠️ DIKKAT: [onemli notlar]
+💡 STRATEJI: [gunluk strateji tavsiyesi]
+━━━━━━━━━━━━━━━━━━━━━━
+🎓 HATIRLATMA
+━━━━━━━━━━━━━━━━━━━━━━
+✅ Bu bir analiz, sinyal degil
+✅ Setup yoksa trade yok
+✅ Invalid seviyeler gecerse bias iptal
+✅ Risk max %1-2
+📚 Konsept: Body close onemli | Premium'dan short, discount'tan long | HTF bias olmadan LTF entry yok
+━━━━━━━━━━━━━━━━━━━━━━
+📊 Bir sonraki analiz yarin 09:00'da
+━━━━━━━━━━━━━━━━━━━━━━"""
+
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": CLAUDE_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 2000,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
+        )
+        data = r.json()
+        if "content" in data and data["content"]:
+            return data["content"][0]["text"]
+        log.error(f"Claude API hatasi: {data}")
+        return None
+    except Exception as e:
+        log.error(f"Claude API istegi hatasi: {e}")
+        return None
+
+async def send_daily_analysis(app):
+    """Sabah 09:00 TR saatinde gunluk analiz gonder"""
+    global last_daily_analiz
+    log.info("Gunluk analiz gonderiliyor...")
+
+    context = get_market_context()
+    if not context:
+        await app.bot.send_message(chat_id=TG_CHAT_ID, text="Gunluk analiz icin veri alinamadi.")
+        return
+
+    # Her sembol icin ayri analiz
+    for symbol_display in ["XAUUSD (Gold)", "NAS100 (QQQ)"]:
+        analysis = generate_daily_analysis(symbol_display, context)
+        if analysis:
+            # Telegram 4096 karakter limiti - uzunsa bolu
+            if len(analysis) > 4000:
+                parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
+                for part in parts:
+                    await app.bot.send_message(chat_id=TG_CHAT_ID, text=part)
+                    await asyncio.sleep(1)
+            else:
+                await app.bot.send_message(chat_id=TG_CHAT_ID, text=analysis)
+            await asyncio.sleep(2)
+        else:
+            await app.bot.send_message(
+                chat_id=TG_CHAT_ID,
+                text=f"{symbol_display} analizi olusturulamadi. CLAUDE_API_KEY kontrol et."
+            )
+
+    last_daily_analiz = datetime.utcnow().date()
+    log.info("Gunluk analiz gonderildi!")
+
+# ── ICT ANALİZ ───────────────────────────────────────────────
 def analyze_ict(df):
     if df is None or len(df) < OB_LOOKBACK + 5:
         return None
@@ -159,11 +346,9 @@ def analyze_ict(df):
             "sl_pips": sl_pips, "tp_pips": tp_pips, "rr": rr,
             "conf": len(reasons), "reasons": reasons}
 
-def is_market_open() -> bool:
-    """Pazartesi-Cuma, 00:00-22:00 UTC arasi acik"""
+def is_market_open():
     now = datetime.utcnow()
-    if now.weekday() >= 5:  # 5=Cumartesi, 6=Pazar
-        return False
+    if now.weekday() >= 5: return False
     return True
 
 def get_session():
@@ -188,15 +373,30 @@ def format_signal(symbol, sig):
         f"Seans  : {get_session()}\nGiris karari SANA ait!"
     )
 
-# ── Sinyal Dongusu ───────────────────────────────────────────
+# ── ANA DONGÜ ────────────────────────────────────────────────
 async def scan_loop(app):
-    log.info("Sinyal tarama dongusu basladi")
+    global last_daily_analiz
+    log.info("Ana dongü basladi")
+
     while True:
-        await asyncio.sleep(SIGNAL_INTERVAL)
+        await asyncio.sleep(60)
+
+        now_tr   = datetime.utcnow() + timedelta(hours=3)
+        bugun    = now_tr.date()
+        saat     = now_tr.hour
+        dakika   = now_tr.minute
+
+        # Sabah 09:00 TR saatinde gunluk analiz gonder (haftaici)
+        if (saat == 9 and dakika == 0 and
+            now_tr.weekday() < 5 and
+            last_daily_analiz != bugun):
+            await send_daily_analysis(app)
+
+        # ICT sinyal tarama
         if not bot_active: continue
         if not is_market_open():
-            log.info("Piyasa kapali (hafta sonu), sinyal atlanıyor")
             continue
+
         for symbol, cfg in SYMBOLS.items():
             try:
                 last = last_signal_time.get(symbol)
@@ -212,13 +412,14 @@ async def scan_loop(app):
             except Exception as e:
                 log.error(f"Scan hatasi {symbol}: {e}")
 
-# ── Komutlar ─────────────────────────────────────────────────
+# ── KOMUTLAR ────────────────────────────────────────────────
 def is_admin(uid): return uid in ADMIN_IDS
 
 async def cmd_start(update, ctx):
     await update.message.reply_text(
         "Warren Bot V4 Aktif!\n====================\n"
         "/durum /fiyat /analiz /sinyal /istatistik\n"
+        "/htfanaliz - Simdi gunluk analiz gonder\n"
         "/ac /kapat\n====================\n"
         "GRUP: /kick /ban /unban /mute /unmute /uyar /uyarlar"
     )
@@ -227,11 +428,14 @@ async def cmd_yardim(update, ctx): await cmd_start(update, ctx)
 
 async def cmd_durum(update, ctx):
     wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+    son_analiz = str(last_daily_analiz) if last_daily_analiz else "Henuz yok"
     await update.message.reply_text(
         f"Durum   : {'Aktif' if bot_active else 'Kapali'}\n"
         f"Piyasa  : {'Acik' if is_market_open() else 'KAPALI (Hafta Sonu)'}\n"
-        f"Seans   : {get_session()}\nSaat    : {datetime.utcnow().strftime('%H:%M UTC')}\n"
-        f"Sinyal  : {stats['total']}  WR: %{wr:.1f}"
+        f"Seans   : {get_session()}\n"
+        f"Saat    : {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"Sinyal  : {stats['total']}  WR: %{wr:.1f}\n"
+        f"Son Analiz: {son_analiz}"
     )
 
 async def cmd_fiyat(update, ctx):
@@ -242,13 +446,13 @@ async def cmd_fiyat(update, ctx):
     await update.message.reply_text("\n".join(lines))
 
 async def cmd_analiz(update, ctx):
-    symbol = (ctx.args[0].upper() if ctx.args else "XAUUSD")
+    symbol = (ctx.args[0].upper() if ctx.args else "XAU/USD")
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
     await update.message.reply_text(f"{symbol} analiz ediliyor...")
     df = get_candles(symbol, SYMBOLS[symbol]["interval"], 50)
     if df is None:
-        await update.message.reply_text("Veri alinamadi, API key kontrol et."); return
+        await update.message.reply_text("Veri alinamadi."); return
     sig = analyze_ict(df)
     if sig: await update.message.reply_text(format_signal(symbol, sig))
     else:   await update.message.reply_text(f"{symbol}: Setup yok, bekleniyor... ({get_session()})")
@@ -263,13 +467,10 @@ async def cmd_sinyal(update, ctx):
     global last_signal_time
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Yetkin yok."); return
-
-    # Belirli sembol istendiyse sadece onu tara
     req = " ".join(ctx.args).upper().replace(" ", "/") if ctx.args else None
     if req and req not in SYMBOLS:
         mevcut = ", ".join(SYMBOLS.keys())
         await update.message.reply_text("Bilinmeyen sembol: " + req + "\nMevcut: " + mevcut); return
-
     scan_symbols = {req: SYMBOLS[req]} if req else SYMBOLS
     await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
     last_signal_time = {}; found = False
@@ -279,6 +480,13 @@ async def cmd_sinyal(update, ctx):
             await update.message.reply_text(format_signal(symbol, sig))
             stats["total"] += 1; last_signal_time[symbol] = datetime.utcnow(); found = True
     if not found: await update.message.reply_text("Setup yok, bekleniyor...")
+
+async def cmd_htfanaliz(update, ctx):
+    """Manuel gunluk analiz tetikle"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Yetkin yok."); return
+    await update.message.reply_text("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
+    await send_daily_analysis(ctx.application)
 
 async def cmd_ac(update, ctx):
     global bot_active
@@ -290,11 +498,25 @@ async def cmd_kapat(update, ctx):
     if not is_admin(update.effective_user.id): return
     bot_active = False; await update.message.reply_text("Bot durduruldu. /ac ile baslatabilirsin.")
 
+# ── GRUP YÖNETİMİ ────────────────────────────────────────────
+async def get_target(update, ctx):
+    if update.message.reply_to_message:
+        return update.message.reply_to_message.from_user
+    if ctx.args:
+        username = ctx.args[0].lstrip("@")
+        try:
+            member = await ctx.bot.get_chat_member(update.effective_chat.id, username)
+            return member.user
+        except:
+            await update.message.reply_text(f"Kullanici bulunamadi: @{username}")
+            return None
+    await update.message.reply_text("Kullanici belirt: reply yap veya @username yaz.")
+    return None
+
 async def cmd_kick(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     try:
         await ctx.bot.ban_chat_member(update.effective_chat.id, t.id)
         await ctx.bot.unban_chat_member(update.effective_chat.id, t.id)
@@ -303,9 +525,8 @@ async def cmd_kick(update, ctx):
 
 async def cmd_ban(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     try:
         await ctx.bot.ban_chat_member(update.effective_chat.id, t.id)
         await update.message.reply_text(f"{t.first_name} banlandi.")
@@ -313,9 +534,8 @@ async def cmd_ban(update, ctx):
 
 async def cmd_unban(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     try:
         await ctx.bot.unban_chat_member(update.effective_chat.id, t.id)
         await update.message.reply_text(f"{t.first_name} bani kaldirildi.")
@@ -323,9 +543,8 @@ async def cmd_unban(update, ctx):
 
 async def cmd_mute(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     dk = int(ctx.args[0]) if ctx.args else 10
     try:
         await ctx.bot.restrict_chat_member(
@@ -338,13 +557,13 @@ async def cmd_mute(update, ctx):
 
 async def cmd_unmute(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     try:
-        await ctx.bot.restrict_chat_ember(
+        await ctx.bot.restrict_chat_member(
             update.effective_chat.id, t.id,
-            permissions=ChatPermissions(can_send_messages=True, can_send_media_messages=True,
+            permissions=ChatPermissions(
+                can_send_messages=True, can_send_media_messages=True,
                 can_send_other_messages=True, can_add_web_page_previews=True)
         )
         await update.message.reply_text(f"{t.first_name} sesi acildi.")
@@ -352,9 +571,8 @@ async def cmd_unmute(update, ctx):
 
 async def cmd_uyar(update, ctx):
     if not is_admin(update.effective_user.id): return
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     sebep = " ".join(ctx.args) if ctx.args else "Kural ihlali"
     warnings_db[t.id] = warnings_db.get(t.id, 0) + 1
     count = warnings_db[t.id]
@@ -367,9 +585,8 @@ async def cmd_uyar(update, ctx):
     await update.message.reply_text(msg)
 
 async def cmd_uyarlar(update, ctx):
-    if not update.message.reply_to_message:
-        await update.message.reply_text("Reply yap."); return
-    t = update.message.reply_to_message.from_user
+    t = await get_target(update, ctx)
+    if not t: return
     await update.message.reply_text(f"{t.first_name}: {warnings_db.get(t.id, 0)}/3 uyari")
 
 async def spam_check(update, ctx):
@@ -394,7 +611,7 @@ async def welcome(update, ctx):
         if not m.is_bot:
             await update.message.reply_text(f"Hos geldin {m.first_name}! ICT sinyal grubuna katildin.")
 
-# ── Main ─────────────────────────────────────────────────────
+# ── MAIN ────────────────────────────────────────────────────
 async def main():
     threading.Thread(target=start_server, daemon=True).start()
 
@@ -407,6 +624,7 @@ async def main():
     app.add_handler(CommandHandler("analiz",     cmd_analiz))
     app.add_handler(CommandHandler("istatistik", cmd_istatistik))
     app.add_handler(CommandHandler("sinyal",     cmd_sinyal))
+    app.add_handler(CommandHandler("htfanaliz",  cmd_htfanaliz))
     app.add_handler(CommandHandler("ac",         cmd_ac))
     app.add_handler(CommandHandler("kapat",      cmd_kapat))
     app.add_handler(CommandHandler("kick",       cmd_kick))
