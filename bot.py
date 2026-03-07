@@ -27,8 +27,10 @@ TD_API_KEY = os.environ.get("TD_API_KEY", "YOUR_TWELVEDATA_KEY")
 ADMIN_IDS  = [6663913960]
 
 SYMBOLS = {
-    "XAU/USD": {"name": "Gold",  "interval": "1min"},
-    "QQQ":     {"name": "US100", "interval": "1min"},
+    "XAU/USD": {"name": "Gold",   "interval": "1min"},
+    "QQQ":     {"name": "US100",  "interval": "1min"},
+    "EUR/USD": {"name": "EURUSD", "interval": "1min"},
+    "GBP/USD": {"name": "GBPUSD", "interval": "1min"},
 }
 
 COOLDOWN_MIN    = 30
@@ -261,9 +263,17 @@ async def cmd_sinyal(update, ctx):
     global last_signal_time
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Yetkin yok."); return
-    await update.message.reply_text("Taranıyor...")
+
+    # Belirli sembol istendiyse sadece onu tara
+    req = " ".join(ctx.args).upper().replace(" ", "/") if ctx.args else None
+    if req and req not in SYMBOLS:
+        await update.message.reply_text(f"Bilinmeyen sembol: {req}
+Mevcut: {', '.join(SYMBOLS.keys())}"); return
+
+    scan_symbols = {req: SYMBOLS[req]} if req else SYMBOLS
+    await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
     last_signal_time = {}; found = False
-    for symbol, cfg in SYMBOLS.items():
+    for symbol, cfg in scan_symbols.items():
         df = get_candles(symbol, cfg["interval"], 50); sig = analyze_ict(df)
         if sig:
             await update.message.reply_text(format_signal(symbol, sig))
