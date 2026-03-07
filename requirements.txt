@@ -1,4 +1,4 @@
 python-telegram-bot==20.7
 requests==2.31.0
-pandas==2.1.4
-numpy==1.26.3
+pandas==2.2.3
+numpy==2.1.0
