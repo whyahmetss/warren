@@ -157,6 +157,13 @@ def analyze_ict(df):
             "sl_pips": sl_pips, "tp_pips": tp_pips, "rr": rr,
             "conf": len(reasons), "reasons": reasons}
 
+def is_market_open() -> bool:
+    """Pazartesi-Cuma, 00:00-22:00 UTC arasi acik"""
+    now = datetime.utcnow()
+    if now.weekday() >= 5:  # 5=Cumartesi, 6=Pazar
+        return False
+    return True
+
 def get_session():
     h = datetime.utcnow().hour
     if 8  <= h < 12: return "London Kill Zone"
@@ -185,6 +192,9 @@ async def scan_loop(app):
     while True:
         await asyncio.sleep(SIGNAL_INTERVAL)
         if not bot_active: continue
+        if not is_market_open():
+            log.info("Piyasa kapali (hafta sonu), sinyal atlanıyor")
+            continue
         for symbol, cfg in SYMBOLS.items():
             try:
                 last = last_signal_time.get(symbol)
@@ -216,9 +226,10 @@ async def cmd_yardim(update, ctx): await cmd_start(update, ctx)
 async def cmd_durum(update, ctx):
     wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
     await update.message.reply_text(
-        f"Durum : {'Aktif' if bot_active else 'Kapali'}\n"
-        f"Seans : {get_session()}\nSaat  : {datetime.utcnow().strftime('%H:%M UTC')}\n"
-        f"Sinyal: {stats['total']}  WR: %{wr:.1f}"
+        f"Durum   : {'Aktif' if bot_active else 'Kapali'}\n"
+        f"Piyasa  : {'Acik' if is_market_open() else 'KAPALI (Hafta Sonu)'}\n"
+        f"Seans   : {get_session()}\nSaat    : {datetime.utcnow().strftime('%H:%M UTC')}\n"
+        f"Sinyal  : {stats['total']}  WR: %{wr:.1f}"
     )
 
 async def cmd_fiyat(update, ctx):
