@@ -267,8 +267,8 @@ async def cmd_sinyal(update, ctx):
     # Belirli sembol istendiyse sadece onu tara
     req = " ".join(ctx.args).upper().replace(" ", "/") if ctx.args else None
     if req and req not in SYMBOLS:
-        await update.message.reply_text(f"Bilinmeyen sembol: {req}
-Mevcut: {', '.join(SYMBOLS.keys())}"); return
+        mevcut = ", ".join(SYMBOLS.keys())
+        await update.message.reply_text("Bilinmeyen sembol: " + req + "\nMevcut: " + mevcut); return
 
     scan_symbols = {req: SYMBOLS[req]} if req else SYMBOLS
     await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
