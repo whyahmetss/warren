@@ -27,8 +27,8 @@ TD_API_KEY = os.environ.get("TD_API_KEY", "YOUR_TWELVEDATA_KEY")
 ADMIN_IDS  = [6663913960]
 
 SYMBOLS = {
-    "XAUUSD": {"name": "Gold",  "interval": "1min"},
-    "US100":  {"name": "US100", "interval": "1min"},
+    "XAU/USD": {"name": "Gold",  "interval": "1min"},
+    "QQQ":     {"name": "US100", "interval": "1min"},
 }
 
 COOLDOWN_MIN    = 30
