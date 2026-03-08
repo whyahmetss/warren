@@ -442,18 +442,7 @@ async def scan_loop(app):
 def is_admin(uid): return uid in ADMIN_IDS
 
 def _panel_main_msg():
-    return (
-        "Warren panel\n\n"
-        "📋 durum\n"
-        "   ├\n"
-        "   ├\n"
-        "   └\n\n"
-        "🖥 analiz\n"
-        "   ├\n"
-        "   ├\n"
-        "   ├\n"
-        "   └"
-    )
+    return "Warren panel"
 
 def _panel_main_kbd():
     return InlineKeyboardMarkup([
@@ -475,12 +464,7 @@ def _panel_main_kbd():
     ])
 
 def _panel_durum_msg():
-    return (
-        "Warren panel › durum\n\n"
-        "   ├ Bot\n"
-        "   ├ Piyasa\n"
-        "   └ Sinyal"
-    )
+    return "Warren panel › durum"
 
 def _panel_durum_kbd():
     return InlineKeyboardMarkup([
@@ -493,13 +477,7 @@ def _panel_durum_kbd():
     ])
 
 def _panel_analiz_msg():
-    return (
-        "Warren panel › analiz\n\n"
-        "   ├ XAUUSD\n"
-        "   ├ QQQ\n"
-        "   ├ EURUSD\n"
-        "   └ GBPUSD"
-    )
+    return "Warren panel › analiz"
 
 _SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
 
@@ -517,12 +495,7 @@ def _panel_analiz_kbd():
     ])
 
 def _panel_grup_msg():
-    return (
-        "Warren panel › grup\n\n"
-        "   ├ kick  ban  unban\n"
-        "   ├ mute  unmute\n"
-        "   └ uyar  uyarlar"
-    )
+    return "Warren panel › grup"
 
 def _panel_grup_kbd():
     return InlineKeyboardMarkup([
