@@ -534,66 +534,69 @@ async def scan_loop(app):
 def is_admin(uid): return uid in ADMIN_IDS
 
 def _panel_main_msg():
-    return "Warren panel"
+    return "Warren Panel"
 
 def _panel_main_kbd():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📋 durum", callback_data="panel_durum"),
-            InlineKeyboardButton("🖥 analiz", callback_data="panel_analiz"),
+            InlineKeyboardButton("📋 Durum", callback_data="panel_durum"),
+            InlineKeyboardButton("🖥 Analiz", callback_data="panel_analiz"),
         ],
         [
-            InlineKeyboardButton("💰 fiyat", callback_data="cmd_fiyat"),
-            InlineKeyboardButton("🔍 sinyal", callback_data="cmd_sinyal"),
-            InlineKeyboardButton("📉 istatistik", callback_data="cmd_istatistik"),
+            InlineKeyboardButton("💰 Fiyat", callback_data="cmd_fiyat"),
+            InlineKeyboardButton("🔍 Sinyal", callback_data="cmd_sinyal"),
         ],
         [
-            InlineKeyboardButton("📋 HTF", callback_data="cmd_htfanaliz"),
-            InlineKeyboardButton("▶ aç", callback_data="cmd_ac"),
-            InlineKeyboardButton("⏹ kapat", callback_data="cmd_kapat"),
+            InlineKeyboardButton("📊 Dashboard", callback_data="cmd_dashboard"),
+            InlineKeyboardButton("📰 Haberler", callback_data="cmd_haber"),
         ],
         [
-            InlineKeyboardButton("📊 dashboard", callback_data="cmd_dashboard"),
-            InlineKeyboardButton("📈 equity", callback_data="cmd_equity"),
+            InlineKeyboardButton("📈 Equity", callback_data="cmd_equity"),
+            InlineKeyboardButton("📉 İstatistik", callback_data="cmd_istatistik"),
         ],
         [
-            InlineKeyboardButton("👥 grup", callback_data="panel_grup"),
+            InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz"),
+            InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
+            InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+        ],
+        [
+            InlineKeyboardButton("👥 Grup", callback_data="panel_grup"),
         ],
     ])
 
 def _panel_durum_msg():
-    return "Warren panel › durum"
+    return "Warren Panel › Durum"
 
 def _panel_durum_kbd():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Bot", callback_data="cmd_durum_bot"),
-            InlineKeyboardButton("Piyasa", callback_data="cmd_durum_piyasa"),
-            InlineKeyboardButton("Sinyal", callback_data="cmd_durum_sinyal"),
+            InlineKeyboardButton("🤖 Bot", callback_data="cmd_durum_bot"),
+            InlineKeyboardButton("📡 Piyasa", callback_data="cmd_durum_piyasa"),
+            InlineKeyboardButton("📊 Sinyal", callback_data="cmd_durum_sinyal"),
         ],
-        [InlineKeyboardButton("◀ geri", callback_data="panel")],
+        [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
 
 def _panel_analiz_msg():
-    return "Warren panel › analiz"
+    return "Warren Panel › Analiz"
 
 _SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
 
 def _panel_analiz_kbd():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("XAUUSD", callback_data="cmd_analiz_XAUUSD"),
-            InlineKeyboardButton("US100", callback_data="cmd_analiz_QQQ"),
+            InlineKeyboardButton("🥇 XAUUSD", callback_data="cmd_analiz_XAUUSD"),
+            InlineKeyboardButton("📊 US100", callback_data="cmd_analiz_QQQ"),
         ],
         [
-            InlineKeyboardButton("EURUSD", callback_data="cmd_analiz_EURUSD"),
-            InlineKeyboardButton("BTCUSDT", callback_data="cmd_analiz_BTCUSDT"),
+            InlineKeyboardButton("💶 EURUSD", callback_data="cmd_analiz_EURUSD"),
+            InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSDT"),
         ],
-        [InlineKeyboardButton("◀ geri", callback_data="panel")],
+        [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
 
 def _panel_grup_msg():
-    return "Warren panel › grup"
+    return "Warren Panel › Grup"
 
 def _panel_grup_kbd():
     return InlineKeyboardMarkup([
@@ -610,7 +613,7 @@ def _panel_grup_kbd():
             InlineKeyboardButton("Uyar", callback_data="cmd_uyar"),
             InlineKeyboardButton("Uyarlar", callback_data="cmd_uyarlar"),
         ],
-        [InlineKeyboardButton("◀ geri", callback_data="panel")],
+        [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
 
 async def cmd_start(update, ctx):
@@ -822,6 +825,28 @@ async def handle_button(update, ctx):
             await ctx.bot.send_photo(chat_id=target.chat_id, photo=buf)
         except Exception as e:
             await reply(f"Grafik hatasi: {e}")
+    elif cmd == "haber":
+        await reply("📰 Haberler analiz ediliyor...")
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={
+                    "model": "claude-sonnet-4-20250514", "max_tokens": 800,
+                    "messages": [{"role": "user", "content": (
+                        f"Tarih: {(datetime.utcnow() + timedelta(hours=3)).strftime('%d %B %Y %H:%M')} TR\n\n"
+                        "Piyasalari etkileyen guncel haberleri degerlendir. XAU/USD ve NAS100 icin:\n"
+                        "1. Genel sentiment (Bullish/Bearish/Notr)\n2. Risk faktorleri\n3. Kisa vadeli firsat/tehdit\nKisa yaz."
+                    )}]
+                }, timeout=30
+            )
+            data = r.json()
+            if "content" in data and data["content"]:
+                await reply(f"📰 Haber Analizi\n\n{data['content'][0]['text']}")
+            else:
+                await reply("Haber analizi alinamadi.")
+        except Exception as e:
+            await reply(f"Hata: {e}")
     elif cmd in ("kick", "ban", "unban", "mute", "unmute", "uyar", "uyarlar"):
         if not is_admin(q.from_user.id):
             return
