@@ -711,9 +711,6 @@ async def handle_button(update, ctx):
         if sym not in SYMBOLS:
             await reply("Gecersiz sembol.")
             return
-        if not is_admin(q.from_user.id):
-            await reply("Yetkin yok.")
-            return
         cfg = SYMBOLS[sym]
         await reply(f"{sym} analiz ediliyor...")
         df_ltf = get_candles(sym, cfg["interval"], 50)
@@ -733,9 +730,6 @@ async def handle_button(update, ctx):
             lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
         await reply("\n".join(lines))
     elif cmd == "sinyal":
-        if not is_admin(q.from_user.id):
-            await reply("Yetkin yok.")
-            return
         await reply("Taranıyor...")
         last_signal_time.clear()
         found = False
@@ -758,9 +752,6 @@ async def handle_button(update, ctx):
                 lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
         await reply("\n".join(lines))
     elif cmd == "htfanaliz":
-        if not is_admin(q.from_user.id):
-            await reply("Yetkin yok.")
-            return
         await reply("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
         await send_daily_analysis(ctx.application)
     elif cmd == "ac":
@@ -896,8 +887,6 @@ async def cmd_istatistik(update, ctx):
 
 async def cmd_sinyal(update, ctx):
     global last_signal_time
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Yetkin yok."); return
     req = " ".join(ctx.args).upper().replace(" ", "/") if ctx.args else None
     if req and req not in SYMBOLS:
         mevcut = ", ".join(SYMBOLS.keys())
@@ -920,8 +909,6 @@ async def cmd_sinyal(update, ctx):
 
 async def cmd_htfanaliz(update, ctx):
     """Manuel gunluk analiz tetikle"""
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Yetkin yok."); return
     await update.message.reply_text("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
     await send_daily_analysis(ctx.application)
 
