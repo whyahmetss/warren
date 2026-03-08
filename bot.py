@@ -85,6 +85,7 @@ aktif_sinyaller = {}
 gonderilen_takvim_uyarilari = set()  # Tekrar gonderimi onlemek icin
 son_kz_durum = None  # Son Kill Zone durumu (acilis/kapanis tekrarini onlemek icin)
 _takvim_api_cache = {"date": None, "events": []}  # API cache (1 saat)
+_htf_cache = {}  # {symbol: (timestamp, df)} - Twelve Data 8/dk limit icin HTF 15dk cache
 
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
 def get_economic_calendar_api():
@@ -191,6 +192,20 @@ def get_daily_candles(symbol, outputsize=30):
         df = df.astype({"o": float, "h": float, "l": float, "c": float})
         return df.iloc[::-1].reset_index(drop=True)
     except: return None
+
+def get_htf_cached(symbol, interval="15min", outputsize=30):
+    """HTF mumlari 15 dakika cache - Twelve Data 8/dk limit icin"""
+    global _htf_cache
+    now = datetime.utcnow()
+    key = f"{symbol}_{interval}"
+    if key in _htf_cache:
+        ts, df = _htf_cache[key]
+        if (now - ts).total_seconds() < 14 * 60:  # 14 dk cache
+            return df
+    df = get_candles(symbol, interval, outputsize)
+    if df is not None:
+        _htf_cache[key] = (now, df)
+    return df
 
 # ── CLAUDE AI - GUNLUK ANALİZ ───────────────────────────────
 def get_market_context():
@@ -433,7 +448,7 @@ async def scan_loop(app):
     log.info("Ana dongü basladi")
 
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(90)  # 90 sn - Twelve Data 8/dk limit
 
         now_tr   = datetime.utcnow() + timedelta(hours=3)
         bugun    = now_tr.date()
@@ -508,7 +523,9 @@ async def scan_loop(app):
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
                     continue
                 df_ltf = get_candles(symbol, cfg["interval"], 50)
-                df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+                await asyncio.sleep(2)  # API limit: 8/dk - istekleri yay
+                df_htf = get_htf_cached(symbol, cfg.get("htf", "15min"), 30)
+                await asyncio.sleep(2)
                 sig = analyze_ict(df_ltf, df_htf)
                 if sig:
                     txt = format_signal(symbol, sig)
