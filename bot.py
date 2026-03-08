@@ -65,7 +65,7 @@ EKONOMIK_OLAYLAR = [
 ]
 # Aktif sinyal takibi: {symbol: {"direction","entry","sl","tp","time","chat_id"}}
 aktif_sinyaller = {}
-son_takvim_uyari = None
+gonderilen_takvim_uyarilari = set()  # Tekrar gonderimi onlemek icin
 
 # ── KEEP ALIVE ───────────────────────────────────────────────
 class KeepAlive(BaseHTTPRequestHandler):
@@ -928,10 +928,13 @@ async def cmd_backtest(update, ctx):
 
 async def check_economic_calendar(app):
     """Her saat basinda ekonomik takvim kontrolu"""
-    global son_takvim_uyari
+    global gonderilen_takvim_uyarilari
     now_utc = datetime.utcnow()
     now_tr  = now_utc + timedelta(hours=3)
-    saat_str = now_utc.strftime("%H:%M")
+    bugun   = str(now_utc.date())
+
+    # Eski gunlerin kayitlarini temizle
+    gonderilen_takvim_uyarilari = {k for k in gonderilen_takvim_uyarilari if k.endswith(bugun)}
 
     for olay in EKONOMIK_OLAYLAR:
         # Saat 30dk oncesi uyari
@@ -942,9 +945,9 @@ async def check_economic_calendar(app):
 
         if 25 <= fark <= 35:  # 30dk oncesi pencere
             anahtar = f"{olay['olay']}_{now_utc.date()}"
-            if son_takvim_uyari == anahtar:
+            if anahtar in gonderilen_takvim_uyarilari:
                 continue
-            son_takvim_uyari = anahtar
+            gonderilen_takvim_uyarilari.add(anahtar)
 
             uyari = (
                 f"⚠️ *EKONOMİK TAKVİM UYARISI*\n\n"
