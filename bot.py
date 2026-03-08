@@ -52,6 +52,19 @@ last_signal_time = {}
 bot_active       = True
 last_daily_analiz= None  # Son gunluk analiz tarihi
 
+# PnL kayitlari: {kullanici_id: [{"sembol","yon","giris","cikis","lot","pnl","tarih"}]}
+pnl_db = {}
+
+# Ekonomik takvim uyari saatleri (UTC) - manuel liste
+EKONOMIK_OLAYLAR = [
+    {"saat": "13:30", "olay": "NFP (Non-Farm Payrolls)", "gun": 5, "etki": "🔴 YÜKSEK"},  # Cuma
+    {"saat": "19:00", "olay": "FOMC Faiz Kararı",        "gun": -1, "etki": "🔴 YÜKSEK"}, # değişken
+    {"saat": "13:30", "olay": "CPI Enflasyon Verisi",    "gun": -1, "etki": "🔴 YÜKSEK"},
+    {"saat": "14:45", "olay": "PMI Verisi",               "gun": -1, "etki": "🟡 ORTA"},
+    {"saat": "15:00", "olay": "ISM Verisi",               "gun": -1, "etki": "🟡 ORTA"},
+]
+son_takvim_uyari = None
+
 # ── KEEP ALIVE ───────────────────────────────────────────────
 class KeepAlive(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -392,8 +405,8 @@ async def scan_loop(app):
             last_daily_analiz != bugun):
             await send_daily_analysis(app)
 
-        # ICT sinyal tarama
-        if not bot_active: continue
+        # Ekonomik takvim kontrolu
+        await check_economic_calendar(app)
         if not is_market_open():
             continue
 
@@ -606,10 +619,190 @@ async def spam_check(update, ctx):
             message_counts[uid] = []
         except: pass
 
+async def cmd_pnl_dispatcher(update, ctx):
+    """/pnl ekle | liste | sifirla"""
+    if not ctx.args:
+        await update.message.reply_text(
+            "📊 *PnL Komutları*\n\n"
+            "`/pnl ekle SEMBOL YON GIRIS CIKIS LOT`\n"
+            "`/pnl liste` - İşlemlerini gör\n"
+            "`/pnl sifirla` - Kayıtları temizle\n\n"
+            "Örnek: `/pnl ekle XAUUSD LONG 1950 1970 0.1`",
+            parse_mode="Markdown"
+        )
+        return
+    alt = ctx.args[0].lower()
+    ctx.args = ctx.args[1:]
+    if alt == "ekle":
+        await cmd_pnl_ekle(update, ctx)
+    elif alt == "liste":
+        await cmd_pnl_liste(update, ctx)
+    elif alt == "sifirla":
+        await cmd_pnl_sifirla(update, ctx)
+    else:
+        await update.message.reply_text("Geçersiz komut. `/pnl` yaz.", parse_mode="Markdown")
+
 async def welcome(update, ctx):
     for m in update.message.new_chat_members:
         if not m.is_bot:
             await update.message.reply_text(f"Hos geldin {m.first_name}! ICT sinyal grubuna katildin.")
+
+# ── PNL KOMUTLARI ────────────────────────────────────────────
+async def cmd_pnl_ekle(update, ctx):
+    """Kullanim: /pnl ekle XAUUSD LONG 1950.00 1970.00 0.1"""
+    uid = update.effective_user.id
+    args = ctx.args
+    if len(args) < 5:
+        await update.message.reply_text(
+            "Kullanim: `/pnl ekle SEMBOL YON GIRIS CIKIS LOT`\n"
+            "Ornek: `/pnl ekle XAUUSD LONG 1950.00 1970.00 0.1`",
+            parse_mode="Markdown"
+        )
+        return
+    try:
+        sembol = args[0].upper()
+        yon    = args[1].upper()
+        giris  = float(args[2])
+        cikis  = float(args[3])
+        lot    = float(args[4])
+
+        # PnL hesapla (Gold icin pip degeri ~10 USD/lot)
+        fark = (cikis - giris) if yon == "LONG" else (giris - cikis)
+        if "XAU" in sembol or "GOLD" in sembol:
+            pnl = fark * lot * 100
+        elif "US100" in sembol or "QQQ" in sembol or "NAS" in sembol:
+            pnl = fark * lot * 10
+        else:
+            pnl = fark * lot * 100000 * 0.0001  # Forex pip
+
+        kayit = {
+            "sembol": sembol, "yon": yon, "giris": giris,
+            "cikis": cikis, "lot": lot, "pnl": round(pnl, 2),
+            "tarih": datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        }
+        if uid not in pnl_db:
+            pnl_db[uid] = []
+        pnl_db[uid].append(kayit)
+
+        emoji = "✅" if pnl > 0 else "❌"
+        await update.message.reply_text(
+            f"{emoji} *İşlem Kaydedildi*\n\n"
+            f"Sembol: `{sembol}` | Yön: `{yon}`\n"
+            f"Giriş: `{giris}` → Çıkış: `{cikis}`\n"
+            f"Lot: `{lot}` | P/L: `${pnl:+.2f}`",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Hata: {e}")
+
+async def cmd_pnl_liste(update, ctx):
+    uid = update.effective_user.id
+    kayitlar = pnl_db.get(uid, [])
+    if not kayitlar:
+        await update.message.reply_text("Henuz islem kaydedilmemis. `/pnl ekle` ile ekle.", parse_mode="Markdown")
+        return
+
+    toplam = sum(k["pnl"] for k in kayitlar)
+    kazanan = sum(1 for k in kayitlar if k["pnl"] > 0)
+    kaybeden = len(kayitlar) - kazanan
+    wr = (kazanan / len(kayitlar) * 100) if kayitlar else 0
+
+    satirlar = [f"*📊 PnL Raporu* ({len(kayitlar)} islem)\n"]
+    for k in kayitlar[-10:]:  # Son 10
+        emoji = "✅" if k["pnl"] > 0 else "❌"
+        satirlar.append(f"{emoji} {k['sembol']} {k['yon']} `${k['pnl']:+.2f}`")
+
+    satirlar.append(f"\n💰 Toplam: `${toplam:+.2f}`")
+    satirlar.append(f"🎯 Win Rate: `%{wr:.1f}` ({kazanan}W / {kaybeden}L)")
+
+    await update.message.reply_text("\n".join(satirlar), parse_mode="Markdown")
+
+async def cmd_pnl_sifirla(update, ctx):
+    uid = update.effective_user.id
+    pnl_db[uid] = []
+    await update.message.reply_text("🗑️ PnL kayitlari silindi.")
+
+# ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
+async def cmd_haber(update, ctx):
+    """Deepseek ile gold/nas haber sentiment analizi"""
+    await update.message.reply_text("📰 Haberler analiz ediliyor...")
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
+
+        now_tr = datetime.utcnow() + timedelta(hours=3)
+        tarih = now_tr.strftime("%d %B %Y %H:%M")
+
+        mesaj = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=800,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Tarih: {tarih} TR saati\n\n"
+                    "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
+                    "XAU/USD (Gold) ve NAS100 için:\n"
+                    "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
+                    "2. Risk faktörleri\n"
+                    "3. Kısa vadeli fırsat/tehdit\n\n"
+                    "Kısa ve ICT perspektifinden yorum yap."
+                )
+            }]
+        )
+        analiz = mesaj.content[0].text
+        await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Hata: {e}")
+
+# ── EKONOMİK TAKVİM ─────────────────────────────────────────
+async def cmd_takvim(update, ctx):
+    """Bugunun onemli ekonomik olaylarini goster"""
+    now_utc = datetime.utcnow()
+    now_tr  = now_utc + timedelta(hours=3)
+
+    metin = f"📅 *Ekonomik Takvim* ({now_tr.strftime('%d.%m.%Y')})\n\n"
+    metin += "⚠️ Yüksek etkili olaylardan 15dk önce işlem açma!\n\n"
+    metin += "🔴 FOMC, NFP, CPI → Gold/NAS volatilite yüksek\n"
+    metin += "🟡 PMI, ISM, Retail Sales → Orta etki\n\n"
+    metin += "📌 Detaylı takvim: investing.com/economic-calendar\n"
+    metin += "\n*Otomatik uyarı:* Piyasa açılışında aktif 🟢"
+
+    await update.message.reply_text(metin, parse_mode="Markdown")
+
+async def check_economic_calendar(app):
+    """Her saat basinda ekonomik takvim kontrolu"""
+    global son_takvim_uyari
+    now_utc = datetime.utcnow()
+    now_tr  = now_utc + timedelta(hours=3)
+    saat_str = now_utc.strftime("%H:%M")
+
+    for olay in EKONOMIK_OLAYLAR:
+        # Saat 30dk oncesi uyari
+        olay_saati = datetime.strptime(olay["saat"], "%H:%M").replace(
+            year=now_utc.year, month=now_utc.month, day=now_utc.day
+        )
+        fark = (olay_saati - now_utc).total_seconds() / 60
+
+        if 25 <= fark <= 35:  # 30dk oncesi pencere
+            anahtar = f"{olay['olay']}_{now_utc.date()}"
+            if son_takvim_uyari == anahtar:
+                continue
+            son_takvim_uyari = anahtar
+
+            uyari = (
+                f"⚠️ *EKONOMİK TAKVİM UYARISI*\n\n"
+                f"{olay['etki']} - 30 dakika sonra!\n\n"
+                f"📌 **{olay['olay']}**\n"
+                f"🕐 Saat: {olay['saat']} UTC ({int(int(olay['saat'][:2])+3):02d}:{olay['saat'][3:]} TR)\n\n"
+                f"⚡ Yüksek volatilite bekleniyor!\n"
+                f"🛑 Açık pozisyonlarını kontrol et!"
+            )
+            try:
+                await app.bot.send_message(chat_id=TG_CHAT_ID, text=uyari, parse_mode="Markdown")
+                log.info(f"Takvim uyarisi gonderildi: {olay['olay']}")
+            except Exception as e:
+                log.error(f"Takvim uyari hatasi: {e}")
 
 # ── MAIN ────────────────────────────────────────────────────
 async def main():
@@ -634,6 +827,9 @@ async def main():
     app.add_handler(CommandHandler("unmute",     cmd_unmute))
     app.add_handler(CommandHandler("uyar",       cmd_uyar))
     app.add_handler(CommandHandler("uyarlar",    cmd_uyarlar))
+    app.add_handler(CommandHandler("haber",      cmd_haber))
+    app.add_handler(CommandHandler("takvim",     cmd_takvim))
+    app.add_handler(CommandHandler("pnl",        cmd_pnl_dispatcher))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, spam_check), group=1)
 
