@@ -651,7 +651,7 @@ async def health_server():
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
     await site.start()
     log.info("Health server started on port 8080")
 
