@@ -32,6 +32,7 @@ TG_TOKEN      = os.environ.get("TG_TOKEN",      "8698295551:AAFLixj0p8t7REyHcIkX
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
 TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
 CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
+FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "")  # financialmodelingprep.com - ucretsiz key
 ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
@@ -75,6 +76,63 @@ EKONOMIK_OLAYLAR = [
 # Aktif sinyal takibi: {symbol: {"direction","entry","sl","tp","time","chat_id"}}
 aktif_sinyaller = {}
 gonderilen_takvim_uyarilari = set()  # Tekrar gonderimi onlemek icin
+_takvim_api_cache = {"date": None, "events": []}  # API cache (1 saat)
+
+# ── EKONOMİK TAKVİM API ──────────────────────────────────────
+def get_economic_calendar_api():
+    """FMP API'den bugunun ekonomik olaylarini al. Bos/None = fallback kullan."""
+    if not FMP_API_KEY or FMP_API_KEY == "YOUR_FMP_KEY":
+        return None
+    now = datetime.utcnow()
+    today = now.strftime("%Y-%m-%d")
+    if _takvim_api_cache["date"] == today and _takvim_api_cache["events"]:
+        return _takvim_api_cache["events"]
+    try:
+        r = requests.get(
+            "https://financialmodelingprep.com/stable/economic-calendar",
+            params={"from": today, "to": today, "apikey": FMP_API_KEY},
+            timeout=10
+        )
+        data = r.json()
+        if isinstance(data, dict) and "Error" in data:
+            return None
+        if not isinstance(data, list) or len(data) == 0:
+            _takvim_api_cache["date"] = today
+            _takvim_api_cache["events"] = []
+            return []
+        events = []
+        for e in data:
+            # FMP format: date, time veya date datetime, event, country, impact (High/Medium/Low)
+            dt_str = e.get("date") or e.get("datetime") or ""
+            event_name = e.get("event") or e.get("title") or e.get("name") or ""
+            impact = (e.get("impact") or e.get("importance") or "Medium").upper()
+            if "HIGH" in impact: etki = "🔴 YÜKSEK"
+            elif "MEDIUM" in impact or "MED" in impact: etki = "🟡 ORTA"
+            else: etki = "🟢 DÜŞÜK"
+            # dt_str ornegi: "2025-03-10 13:30:00" veya "2025-03-10T13:30:00"
+            hour, minute = "12", "00"
+            dt_str = str(dt_str).replace("T", " ")
+            if " " in dt_str and ":" in dt_str:
+                tpart = dt_str.split()[1]
+                parts = tpart.split(":")
+                try:
+                    h = int(parts[0])
+                    m = int(parts[1]) if len(parts) > 1 else 0
+                    hour, minute = f"{h:02d}", f"{m:02d}"
+                except (ValueError, IndexError):
+                    pass
+            events.append({
+                "saat": f"{hour}:{minute}",
+                "olay": event_name,
+                "etki": etki,
+                "country": e.get("country", ""),
+            })
+        _takvim_api_cache["date"] = today
+        _takvim_api_cache["events"] = events
+        return events
+    except Exception as ex:
+        log.warning(f"Takvim API hatasi: {ex}")
+        return None
 
 # ── KEEP ALIVE ───────────────────────────────────────────────
 class KeepAlive(BaseHTTPRequestHandler):
@@ -1413,20 +1471,29 @@ async def send_weekly_summary(app):
     except: pass
 
 async def check_economic_calendar(app):
-    """Her saat basinda ekonomik takvim kontrolu"""
+    """Her saat basinda ekonomik takvim kontrolu - sadece hafta ici"""
     global gonderilen_takvim_uyarilari
     now_utc = datetime.utcnow()
+    if now_utc.weekday() >= 5:  # Cumartesi=5, Pazar=6 - piyasa kapali, veri yok
+        return
     now_tr  = now_utc + timedelta(hours=3)
     bugun   = str(now_utc.date())
 
     # Eski gunlerin kayitlarini temizle
     gonderilen_takvim_uyarilari = {k for k in gonderilen_takvim_uyarilari if k.endswith(bugun)}
 
-    for olay in EKONOMIK_OLAYLAR:
-        # Saat 30dk oncesi uyari
-        olay_saati = datetime.strptime(olay["saat"], "%H:%M").replace(
-            year=now_utc.year, month=now_utc.month, day=now_utc.day
-        )
+    olaylar = get_economic_calendar_api()
+    if olaylar is None:
+        # API yok/hatali - static fallback (sadece gun kontrolu)
+        olaylar = [o for o in EKONOMIK_OLAYLAR if o.get("gun", -1) == -1 or o.get("gun") == now_utc.weekday()]
+
+    for olay in olaylar:
+        try:
+            olay_saati = datetime.strptime(olay["saat"], "%H:%M").replace(
+                year=now_utc.year, month=now_utc.month, day=now_utc.day
+            )
+        except (ValueError, TypeError):
+            continue
         fark = (olay_saati - now_utc).total_seconds() / 60
 
         if 25 <= fark <= 35:  # 30dk oncesi pencere
