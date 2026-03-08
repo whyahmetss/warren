@@ -8,6 +8,7 @@ Warren Bot V4 - Full Python ICT Trading & Grup Yonetim Botu
 """
 
 import os
+import io
 import logging
 import asyncio
 import threading
@@ -46,6 +47,14 @@ OB_LOOKBACK     = 20
 SIGNAL_INTERVAL = 60
 
 stats            = {"total": 0, "win": 0, "loss": 0}
+stats_per_symbol = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}  # Sembol bazli istatistik
+results_history  = []  # ["W","L","W"...] kayip serisi uyarisi icin
+kill_zone_only   = False  # True: sadece Kill Zone'da sinyal gonder
+favori_semboller = set(SYMBOLS.keys())  # Taranacak semboller (varsayilan hepsi)
+fiyat_alarmlari  = []  # [{"sembol","hedef","yon","chat_id"}]
+signal_tracking  = {}  # {msg_id: {symbol, sig, time}} Al/Gec icin
+last_daily_summary  = None
+last_weekly_summary = None
 warnings_db      = {}
 message_counts   = {}
 last_signal_time = {}
@@ -373,13 +382,25 @@ def get_session():
     if 0  <= h < 7:  return "Asya Seansi"
     return "Normal Seans"
 
+def is_kill_zone():
+    s = get_session()
+    return s in ("London Kill Zone", "New York Kill Zone")
+
+def _sinyal_kalite(sig):
+    """Confluence sayisina gore A/B/C kalite etiketi"""
+    c = sig.get("conf", 0)
+    if c >= 4: return "🅰 A"
+    if c == 3: return "🅱 B"
+    return "© C"
+
 def format_signal(symbol, sig):
     name = SYMBOLS.get(symbol, {}).get("name", symbol)
     ico  = "LONG ^" if sig["direction"] == "LONG" else "SHORT v"
     bar  = "+" * sig["conf"] + "-" * (6 - sig["conf"])
+    kalite = _sinyal_kalite(sig)
     reasons_text = "\n".join(f"  + {r}" for r in sig["reasons"])
     return (
-        f"{'='*22}\n[{ico}] {name} ({symbol})\n{'='*22}\n"
+        f"{'='*22}\n[{ico}] {name} ({symbol})  {kalite}\n{'='*22}\n"
         f"Confluance [{bar}] {sig['conf']}/6\n{reasons_text}\n{'='*22}\n"
         f"Giris  : {sig['price']:.4f}\n"
         f"SL     : {sig['sl']:.4f}  (-{sig['sl_pips']:.1f})\n"
@@ -388,9 +409,18 @@ def format_signal(symbol, sig):
         f"Seans  : {get_session()}\nGiris karari SANA ait!"
     )
 
+def _sinyal_butonlari(signal_id):
+    """Sinyal mesajina Al / Gec butonlari"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Al", callback_data=f"sig_al_{signal_id}"),
+            InlineKeyboardButton("⏭ Geç", callback_data=f"sig_gec_{signal_id}"),
+        ],
+    ])
+
 # ── ANA DONGÜ ────────────────────────────────────────────────
 async def scan_loop(app):
-    global last_daily_analiz
+    global last_daily_analiz, last_daily_summary, last_weekly_summary
     log.info("Ana dongü basladi")
 
     while True:
@@ -410,13 +440,46 @@ async def scan_loop(app):
         # Ekonomik takvim kontrolu
         await check_economic_calendar(app)
 
+        # Fiyat alarmlari
+        for al in list(fiyat_alarmlari):
+            p = get_price(al["sembol"])
+            if p is None: continue
+            tetik = False
+            if al["yon"] == "ust" and p >= al["hedef"]: tetik = True
+            elif al["yon"] == "alt" and p <= al["hedef"]: tetik = True
+            if tetik:
+                try:
+                    await app.bot.send_message(
+                        chat_id=al["chat_id"],
+                        text=f"🔔 *Fiyat alarmi!* {al['sembol']} {p:.4f} seviyesine ulasti (hedef: {al['hedef']})",
+                        parse_mode="Markdown"
+                    )
+                    fiyat_alarmlari.remove(al)
+                except: pass
+
+        # Gunluk ozet (09:05 TR)
+        if (saat == 9 and dakika == 5 and now_tr.weekday() < 5 and last_daily_summary != bugun):
+            await send_daily_summary(app)
+            last_daily_summary = bugun
+
+        # Haftalik ozet (Cuma 18:00 TR)
+        if (saat == 18 and dakika == 0 and now_tr.weekday() == 4 and last_weekly_summary != bugun):
+            await send_weekly_summary(app)
+            last_weekly_summary = bugun
+
         # TP/SL takip
         if aktif_sinyaller:
             await check_tp_sl(app)
         if not is_market_open():
             continue
 
+        # Kill Zone filtresi
+        if kill_zone_only and not is_kill_zone():
+            continue
+
         for symbol, cfg in SYMBOLS.items():
+            if symbol not in favori_semboller:
+                continue
             try:
                 last = last_signal_time.get(symbol)
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
@@ -424,7 +487,16 @@ async def scan_loop(app):
                 df  = get_candles(symbol, cfg["interval"], 50)
                 sig = analyze_ict(df)
                 if sig:
-                    await app.bot.send_message(chat_id=TG_CHAT_ID, text=format_signal(symbol, sig))
+                    txt = format_signal(symbol, sig)
+                    # Kayip serisi uyarisi
+                    if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
+                        txt = f"⚠️ *UYARI:* Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
+                    sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
+                    signal_tracking[sig_id] = {"symbol": symbol, "sig": sig, "time": datetime.utcnow()}
+                    await app.bot.send_message(
+                        chat_id=TG_CHAT_ID, text=txt,
+                        reply_markup=_sinyal_butonlari(sig_id), parse_mode="Markdown"
+                    )
                     last_signal_time[symbol] = datetime.utcnow()
                     aktif_sinyaller[symbol] = {
                         "direction": sig["direction"],
@@ -460,7 +532,10 @@ def _panel_main_kbd():
             InlineKeyboardButton("▶ aç", callback_data="cmd_ac"),
             InlineKeyboardButton("⏹ kapat", callback_data="cmd_kapat"),
         ],
-        [InlineKeyboardButton("👥 grup", callback_data="panel_grup")],
+        [
+            InlineKeyboardButton("👥 grup", callback_data="panel_grup"),
+            InlineKeyboardButton("📈 equity", callback_data="cmd_equity"),
+        ],
     ])
 
 def _panel_durum_msg():
@@ -550,6 +625,17 @@ async def handle_button(update, ctx):
         except Exception:
             await reply(msg)
 
+    # Sinyal Al / Gec
+    if data and data.startswith("sig_"):
+        parts = data.split("_", 2)
+        if len(parts) >= 3:
+            action = parts[1]
+            if action == "al":
+                await reply("✅ Sinyal alindi. Islem kapaninca /pnl ekle ile kaydet.")
+            else:
+                await reply("⏭ Gectin. Sonraki sinyalde gorusuruz.")
+        return
+
     # Panel navigasyonu
     if data == "panel":
         await edit_panel(_panel_main_msg(), _panel_main_kbd())
@@ -587,7 +673,12 @@ async def handle_button(update, ctx):
         )
     elif cmd == "durum_sinyal":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-        await reply(f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}")
+        lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
+        for sym, s in stats_per_symbol.items():
+            if s["total"] > 0:
+                swr = s["win"] / s["total"] * 100
+                lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
+        await reply("\n".join(lines))
     elif cmd.startswith("analiz_"):
         m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
         sym = m.get(cmd[7:], cmd[7:])
@@ -632,7 +723,12 @@ async def handle_button(update, ctx):
             await reply("Setup yok, bekleniyor...")
     elif cmd == "istatistik":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-        await reply(f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}")
+        lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
+        for sym, s in stats_per_symbol.items():
+            if s["total"] > 0:
+                swr = s["win"] / s["total"] * 100
+                lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
+        await reply("\n".join(lines))
     elif cmd == "htfanaliz":
         if not is_admin(q.from_user.id):
             await reply("Yetkin yok.")
@@ -649,6 +745,34 @@ async def handle_button(update, ctx):
             return
         bot_active = False
         await reply("Bot durduruldu. /ac ile baslatabilirsin.")
+    elif cmd == "equity":
+        uid = q.from_user.id
+        kayitlar = pnl_db.get(uid, [])
+        if not kayitlar:
+            await reply("Henuz islem yok. /pnl ekle ile kaydet.")
+            return
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            cum = []
+            s = 0
+            for k in kayitlar:
+                s += k["pnl"]
+                cum.append(s)
+            plt.figure(figsize=(8, 4))
+            plt.plot(cum, color="#2ecc71", linewidth=2)
+            plt.fill_between(range(len(cum)), cum, alpha=0.3)
+            plt.axhline(0, color="gray", linestyle="--")
+            plt.title("Equity Curve")
+            plt.ylabel("Cumulative PnL ($)")
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png", dpi=100)
+            plt.close()
+            buf.seek(0)
+            await ctx.bot.send_photo(chat_id=target.chat_id, photo=buf)
+        except Exception as e:
+            await reply(f"Grafik hatasi: {e}")
     elif cmd in ("kick", "ban", "unban", "mute", "unmute", "uyar", "uyarlar"):
         if not is_admin(q.from_user.id):
             return
@@ -687,9 +811,12 @@ async def cmd_analiz(update, ctx):
 
 async def cmd_istatistik(update, ctx):
     wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-    await update.message.reply_text(
-        f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}"
-    )
+    lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
+    for sym, s in stats_per_symbol.items():
+        if s["total"] > 0:
+            swr = s["win"] / s["total"] * 100
+            lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def cmd_sinyal(update, ctx):
     global last_signal_time
@@ -705,7 +832,11 @@ async def cmd_sinyal(update, ctx):
     for symbol, cfg in scan_symbols.items():
         df = get_candles(symbol, cfg["interval"], 50); sig = analyze_ict(df)
         if sig:
-            await update.message.reply_text(format_signal(symbol, sig))
+            txt = format_signal(symbol, sig)
+            if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
+                txt = f"⚠️ *UYARI:* Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
+            sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
+            await update.message.reply_text(txt, reply_markup=_sinyal_butonlari(sig_id), parse_mode="Markdown")
             stats["total"] += 1; last_signal_time[symbol] = datetime.utcnow(); found = True
     if not found: await update.message.reply_text("Setup yok, bekleniyor...")
 
@@ -839,10 +970,11 @@ async def cmd_pnl_dispatcher(update, ctx):
     if not ctx.args:
         await update.message.reply_text(
             "📊 *PnL Komutları*\n\n"
-            "`/pnl ekle SEMBOL YON GIRIS CIKIS LOT`\n"
-            "`/pnl liste` - İşlemlerini gör\n"
+            "`/pnl ekle SEMBOL YON GIRIS CIKIS LOT [sebep]`\n"
+            "`/pnl liste` - Özet gör\n"
+            "`/pnl journal` - Detaylı işlem listesi\n"
             "`/pnl sifirla` - Kayıtları temizle\n\n"
-            "Örnek: `/pnl ekle XAUUSD LONG 1950 1970 0.1`",
+            "Örnek: `/pnl ekle XAUUSD LONG 1950 1970 0.1 ICT Long`",
             parse_mode="Markdown"
         )
         return
@@ -852,6 +984,8 @@ async def cmd_pnl_dispatcher(update, ctx):
         await cmd_pnl_ekle(update, ctx)
     elif alt == "liste":
         await cmd_pnl_liste(update, ctx)
+    elif alt == "journal":
+        await cmd_pnl_journal(update, ctx)
     elif alt == "sifirla":
         await cmd_pnl_sifirla(update, ctx)
     else:
@@ -864,13 +998,13 @@ async def welcome(update, ctx):
 
 # ── PNL KOMUTLARI ────────────────────────────────────────────
 async def cmd_pnl_ekle(update, ctx):
-    """Kullanim: /pnl ekle XAUUSD LONG 1950.00 1970.00 0.1"""
+    """Kullanim: /pnl ekle XAUUSD LONG 1950.00 1970.00 0.1 [sebep]"""
     uid = update.effective_user.id
     args = ctx.args
     if len(args) < 5:
         await update.message.reply_text(
-            "Kullanim: `/pnl ekle SEMBOL YON GIRIS CIKIS LOT`\n"
-            "Ornek: `/pnl ekle XAUUSD LONG 1950.00 1970.00 0.1`",
+            "Kullanim: `/pnl ekle SEMBOL YON GIRIS CIKIS LOT [sebep]`\n"
+            "Ornek: `/pnl ekle XAUUSD LONG 1950.00 1970.00 0.1 ICT Long`",
             parse_mode="Markdown"
         )
         return
@@ -880,6 +1014,7 @@ async def cmd_pnl_ekle(update, ctx):
         giris  = float(args[2])
         cikis  = float(args[3])
         lot    = float(args[4])
+        sebep  = " ".join(args[5:]) if len(args) > 5 else ""
 
         # PnL hesapla (Gold icin pip degeri ~10 USD/lot)
         fark = (cikis - giris) if yon == "LONG" else (giris - cikis)
@@ -893,7 +1028,8 @@ async def cmd_pnl_ekle(update, ctx):
         kayit = {
             "sembol": sembol, "yon": yon, "giris": giris,
             "cikis": cikis, "lot": lot, "pnl": round(pnl, 2),
-            "tarih": datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+            "tarih": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "sebep": sebep
         }
         if uid not in pnl_db:
             pnl_db[uid] = []
@@ -932,10 +1068,112 @@ async def cmd_pnl_liste(update, ctx):
 
     await update.message.reply_text("\n".join(satirlar), parse_mode="Markdown")
 
+async def cmd_pnl_journal(update, ctx):
+    """Trade journal - detayli islem listesi"""
+    uid = update.effective_user.id
+    kayitlar = pnl_db.get(uid, [])
+    if not kayitlar:
+        await update.message.reply_text("Henuz islem yok.")
+        return
+    satirlar = ["*📓 Trade Journal*\n"]
+    for k in kayitlar[-15:]:
+        emoji = "✅" if k["pnl"] > 0 else "❌"
+        sebep = f" | {k['sebep']}" if k.get("sebep") else ""
+        satirlar.append(f"{emoji} {k['tarih']} {k['sembol']} {k['yon']} `${k['pnl']:+.2f}`{sebep}")
+    await update.message.reply_text("\n".join(satirlar), parse_mode="Markdown")
+
 async def cmd_pnl_sifirla(update, ctx):
     uid = update.effective_user.id
     pnl_db[uid] = []
     await update.message.reply_text("🗑️ PnL kayitlari silindi.")
+
+# ── FAVORİ, ALARM, SEANS, EQUITY ───────────────────────────
+async def cmd_favori(update, ctx):
+    """/favori XAUUSD QQQ - Taranacak sembolleri sec"""
+    global favori_semboller
+    if not is_admin(update.effective_user.id):
+        return
+    args = ctx.args
+    if not args:
+        mevcut = ", ".join(SYMBOLS.get(s, {}).get("name", s) for s in favori_semboller)
+        await update.message.reply_text(f"Favori semboller: {mevcut}\n\nKullanim: /favori XAUUSD QQQ (bos = hepsi)")
+        return
+    yeni = set()
+    for a in args:
+        k = a.upper().replace("/", "")
+        if k in ("XAUUSD", "GOLD"): yeni.add("XAU/USD")
+        elif k in ("QQQ", "US100", "NAS100"): yeni.add("QQQ")
+        elif k in ("EURUSD",): yeni.add("EUR/USD")
+        elif k in ("GBPUSD",): yeni.add("GBP/USD")
+    if yeni:
+        favori_semboller = yeni
+        await update.message.reply_text(f"Favori: {', '.join(SYMBOLS.get(s,{}).get('name',s) for s in favori_semboller)}")
+    else:
+        favori_semboller = set(SYMBOLS.keys())
+        await update.message.reply_text("Favori: Tum semboller")
+
+async def cmd_alarm(update, ctx):
+    """//alarm XAUUSD 2650 ust - Fiyat 2650'ye ulasinca uyari"""
+    if not ctx.args or len(ctx.args) < 3:
+        await update.message.reply_text("Kullanim: /alarm SEMBOL FIYAT ust|alt\nOrnek: /alarm XAUUSD 2650 ust")
+        return
+    sym = ctx.args[0].upper().replace(" ", "/")
+    if sym == "XAUUSD": sym = "XAU/USD"
+    elif sym in ("QQQ", "US100"): sym = "QQQ"
+    elif sym == "EURUSD": sym = "EUR/USD"
+    elif sym == "GBPUSD": sym = "GBP/USD"
+    if sym not in SYMBOLS:
+        await update.message.reply_text("Gecersiz sembol. XAUUSD, QQQ, EURUSD, GBPUSD")
+        return
+    try:
+        hedef = float(ctx.args[1])
+        yon = ctx.args[2].lower()
+        if yon not in ("ust", "alt"):
+            raise ValueError()
+    except:
+        await update.message.reply_text("Fiyat sayi olmali, yon: ust veya alt")
+        return
+    fiyat_alarmlari.append({"sembol": sym, "hedef": hedef, "yon": yon, "chat_id": update.effective_chat.id})
+    await update.message.reply_text(f"Alarm eklendi: {sym} {hedef} {yon}")
+
+async def cmd_seans(update, ctx):
+    """Kill Zone filtresini ac/kapat"""
+    global kill_zone_only
+    if not is_admin(update.effective_user.id):
+        return
+    kill_zone_only = not kill_zone_only
+    durum = "acik" if kill_zone_only else "kapali"
+    await update.message.reply_text(f"Kill Zone filtresi: {durum}")
+
+async def cmd_equity(update, ctx):
+    """Equity curve grafigi - PnL verisinden"""
+    uid = update.effective_user.id
+    kayitlar = pnl_db.get(uid, [])
+    if not kayitlar:
+        await update.message.reply_text("Henuz islem yok. /pnl ekle ile kaydet.")
+        return
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        cum = []
+        s = 0
+        for k in kayitlar:
+            s += k["pnl"]
+            cum.append(s)
+        plt.figure(figsize=(8, 4))
+        plt.plot(cum, color="#2ecc71", linewidth=2)
+        plt.fill_between(range(len(cum)), cum, alpha=0.3)
+        plt.axhline(0, color="gray", linestyle="--")
+        plt.title("Equity Curve")
+        plt.ylabel("Cumulative PnL ($)")
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=100)
+        plt.close()
+        buf.seek(0)
+        await update.message.reply_photo(photo=buf)
+    except Exception as e:
+        await update.message.reply_text(f"Grafik hatasi: {e}")
 
 # ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
 async def cmd_haber(update, ctx):
@@ -988,7 +1226,7 @@ async def cmd_takvim(update, ctx):
 # ── TP/SL TAKİPÇİSİ ─────────────────────────────────────────
 async def check_tp_sl(app):
     """Aktif sinyallerin TP/SL'e ulaşıp ulaşmadığını kontrol et"""
-    global aktif_sinyaller
+    global aktif_sinyaller, stats_per_symbol, results_history
     kapatilacak = []
 
     for symbol, sig in aktif_sinyaller.items():
@@ -1021,8 +1259,20 @@ async def check_tp_sl(app):
 
             if hit == "TP":
                 stats["win"] += 1
+                results_history.append("W")
             else:
                 stats["loss"] += 1
+                results_history.append("L")
+            if len(results_history) > 50:
+                results_history[:] = results_history[-50:]
+            # Sembol bazli istatistik
+            if symbol not in stats_per_symbol:
+                stats_per_symbol[symbol] = {"total": 0, "win": 0, "loss": 0}
+            stats_per_symbol[symbol]["total"] += 1
+            if hit == "TP":
+                stats_per_symbol[symbol]["win"] += 1
+            else:
+                stats_per_symbol[symbol]["loss"] += 1
 
             mesaj = (
                 f"{emoji} *{hit} HIT - {sonuc}*\n"
@@ -1128,6 +1378,40 @@ async def cmd_backtest(update, ctx):
         log.error(f"Backtest hatasi: {e}")
         await update.message.reply_text(f"❌ Backtest hatası: {e}")
 
+async def send_daily_summary(app):
+    """Dunun performans ozeti"""
+    if stats["total"] == 0:
+        return
+    wr = stats["win"] / stats["total"] * 100
+    satirlar = [
+        "📊 *Gunluk Ozet*",
+        f"Toplam: {stats['total']} | ✅{stats['win']} ❌{stats['loss']} | WR: %{wr:.1f}",
+    ]
+    for sym, s in stats_per_symbol.items():
+        if s["total"] > 0:
+            swr = s["win"] / s["total"] * 100
+            satirlar.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} islem WR %{swr:.1f}")
+    try:
+        await app.bot.send_message(chat_id=TG_CHAT_ID, text="\n".join(satirlar), parse_mode="Markdown")
+    except: pass
+
+async def send_weekly_summary(app):
+    """Haftalik performans ozeti"""
+    if stats["total"] == 0:
+        return
+    wr = stats["win"] / stats["total"] * 100
+    satirlar = [
+        "📈 *Haftalik Ozet*",
+        f"Toplam: {stats['total']} | ✅{stats['win']} ❌{stats['loss']} | WR: %{wr:.1f}",
+    ]
+    for sym, s in stats_per_symbol.items():
+        if s["total"] > 0:
+            swr = s["win"] / s["total"] * 100
+            satirlar.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} islem WR %{swr:.1f}")
+    try:
+        await app.bot.send_message(chat_id=TG_CHAT_ID, text="\n".join(satirlar), parse_mode="Markdown")
+    except: pass
+
 async def check_economic_calendar(app):
     """Her saat basinda ekonomik takvim kontrolu"""
     global gonderilen_takvim_uyarilari
@@ -1192,6 +1476,10 @@ async def main():
     app.add_handler(CommandHandler("uyarlar",    cmd_uyarlar))
     app.add_handler(CommandHandler("haber",      cmd_haber))
     app.add_handler(CommandHandler("takvim",     cmd_takvim))
+    app.add_handler(CommandHandler("favori",     cmd_favori))
+    app.add_handler(CommandHandler("alarm",      cmd_alarm))
+    app.add_handler(CommandHandler("seans",      cmd_seans))
+    app.add_handler(CommandHandler("equity",     cmd_equity))
     app.add_handler(CommandHandler("pnl",        cmd_pnl_dispatcher))
     app.add_handler(CommandHandler("backtest",   cmd_backtest))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
