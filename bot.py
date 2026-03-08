@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 TG_TOKEN      = os.environ.get("TG_TOKEN",      "8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w")
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
 TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
-CLAUDE_API_KEY= os.environ.get("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")
+CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
 ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
@@ -563,7 +563,7 @@ async def cmd_unmute(update, ctx):
         await ctx.bot.restrict_chat_member(
             update.effective_chat.id, t.id,
             permissions=ChatPermissions(
-                can_send_messages=True, can_send_media_messages=True,
+                can_send_messages=True, can_send_other_messages=True,
                 can_send_other_messages=True, can_add_web_page_previews=True)
         )
         await update.message.reply_text(f"{t.first_name} sesi acildi.")
