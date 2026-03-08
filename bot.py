@@ -83,6 +83,7 @@ EKONOMIK_OLAYLAR = [
 # Aktif sinyal takibi: {symbol: {"direction","entry","sl","tp","time","chat_id"}}
 aktif_sinyaller = {}
 gonderilen_takvim_uyarilari = set()  # Tekrar gonderimi onlemek icin
+son_kz_durum = None  # Son Kill Zone durumu (acilis/kapanis tekrarini onlemek icin)
 _takvim_api_cache = {"date": None, "events": []}  # API cache (1 saat)
 
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
@@ -444,6 +445,9 @@ async def scan_loop(app):
             now_tr.weekday() < 5 and
             last_daily_analiz != bugun):
             await send_daily_analysis(app)
+
+        # Kill Zone acilis/kapanis bildirimi
+        await check_kill_zone_status(app)
 
         # Ekonomik takvim kontrolu
         await check_economic_calendar(app)
@@ -1495,6 +1499,67 @@ async def cmd_backtest(update, ctx):
     except Exception as e:
         log.error(f"Backtest hatasi: {e}")
         await update.message.reply_text(f"❌ Backtest hatası: {e}")
+
+async def check_kill_zone_status(app):
+    """Kill Zone acilis/kapanis bildirimi"""
+    global son_kz_durum
+
+    if not is_market_open():
+        return
+
+    from ict_engine import KILL_ZONES
+    now_utc = datetime.utcnow()
+    h = now_utc.hour
+    m = now_utc.minute
+    tr_saat = h + 3
+
+    for key, kz in KILL_ZONES.items():
+        kz_name = kz["name"]
+        start_h = kz["start"]
+        end_h = kz["end"]
+
+        # Acilis: tam saat basinda (dakika 0)
+        if h == start_h and m == 0:
+            anahtar = f"acilis_{key}_{now_utc.date()}"
+            if son_kz_durum == anahtar:
+                continue
+            son_kz_durum = anahtar
+            tr_start = start_h + 3
+            tr_end = end_h + 3
+            try:
+                await app.bot.send_message(
+                    chat_id=TG_CHAT_ID,
+                    text=(
+                        f"🟢 *{kz_name} AÇILDI*\n\n"
+                        f"🕐 {tr_start:02d}:00 - {tr_end:02d}:00 TR\n"
+                        f"📡 Sinyal tarama aktif\n"
+                        f"⚡ Yüksek kaliteli setup'ları bekliyorum..."
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                log.error(f"KZ acilis mesaj hatasi: {e}")
+            return
+
+        # Kapanis: tam saat basinda (dakika 0)
+        if h == end_h and m == 0:
+            anahtar = f"kapanis_{key}_{now_utc.date()}"
+            if son_kz_durum == anahtar:
+                continue
+            son_kz_durum = anahtar
+            try:
+                await app.bot.send_message(
+                    chat_id=TG_CHAT_ID,
+                    text=(
+                        f"🔴 *{kz_name} KAPANDI*\n\n"
+                        f"📊 Sinyal tarama durduruldu\n"
+                        f"📋 Açık pozisyonlarını kontrol et"
+                    ),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                log.error(f"KZ kapanis mesaj hatasi: {e}")
+            return
 
 async def send_daily_summary(app):
     """Dunun performans ozeti"""
