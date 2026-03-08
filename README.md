@@ -18,9 +18,10 @@
   - Start: python bot.py
 
 ## 4. Environment Variables (Render Dashboard → Environment)
-TG_TOKEN   = 8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w
-TG_CHAT_ID = -1003838635441
-TD_API_KEY = [Twelve Data'dan aldigin key]
+TG_TOKEN   = ...
+TG_CHAT_ID = ...
+TD_API_KEY = [Twelve Data'dan al]
+FMP_API_KEY = [financialmodelingprep.com - ucretsiz, ekonomik takvim icin]
 
 ## 5. Deploy!
 "Create Web Service" → 2-3 dk bekle → bot calisiyor!
