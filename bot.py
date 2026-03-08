@@ -643,5 +643,20 @@ async def main():
         log.info("Warren Bot V4 baslatildi!")
         await scan_loop(app)
 
+async def health_server():
+    from aiohttp import web
+    async def health(request):
+        return web.Response(text="OK")
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    log.info("Health server started on port 8080")
+
+async def run_all():
+    await asyncio.gather(health_server(), main())
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run_all())
