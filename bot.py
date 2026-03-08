@@ -564,7 +564,7 @@ async def cmd_unmute(update, ctx):
             update.effective_chat.id, t.id,
             permissions=ChatPermissions(
                 can_send_messages=True, can_send_other_messages=True,
-                can_send_other_messages=True, can_add_web_page_previews=True)
+                can_add_web_page_previews=True)
         )
         await update.message.reply_text(f"{t.first_name} sesi acildi.")
     except Exception as e: await update.message.reply_text(f"Hata: {e}")
