@@ -594,7 +594,7 @@ def _panel_analiz_kbd():
         ],
         [
             InlineKeyboardButton("💶 EURUSD", callback_data="cmd_analiz_EURUSD"),
-            InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSDT"),
+            InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSD"),
         ],
         [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
