@@ -441,39 +441,112 @@ async def scan_loop(app):
 # ── KOMUTLAR ────────────────────────────────────────────────
 def is_admin(uid): return uid in ADMIN_IDS
 
-def _komutlar_klavye():
+def _panel_main_msg():
+    return (
+        "Warren panel\n\n"
+        "📋 durum\n"
+        "   ├\n"
+        "   ├\n"
+        "   └\n\n"
+        "🖥 analiz\n"
+        "   ├\n"
+        "   ├\n"
+        "   ├\n"
+        "   └"
+    )
+
+def _panel_main_kbd():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Durum", callback_data="cmd_durum"),
-            InlineKeyboardButton("💰 Fiyat", callback_data="cmd_fiyat"),
-            InlineKeyboardButton("📈 Analiz", callback_data="cmd_analiz"),
+            InlineKeyboardButton("📋 durum", callback_data="panel_durum"),
+            InlineKeyboardButton("🖥 analiz", callback_data="panel_analiz"),
         ],
         [
-            InlineKeyboardButton("🔍 Sinyal", callback_data="cmd_sinyal"),
-            InlineKeyboardButton("📉 İstatistik", callback_data="cmd_istatistik"),
+            InlineKeyboardButton("💰 fiyat", callback_data="cmd_fiyat"),
+            InlineKeyboardButton("🔍 sinyal", callback_data="cmd_sinyal"),
+            InlineKeyboardButton("📉 istatistik", callback_data="cmd_istatistik"),
         ],
         [
-            InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz"),
-            InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
-            InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+            InlineKeyboardButton("📋 HTF", callback_data="cmd_htfanaliz"),
+            InlineKeyboardButton("▶ aç", callback_data="cmd_ac"),
+            InlineKeyboardButton("⏹ kapat", callback_data="cmd_kapat"),
         ],
+        [InlineKeyboardButton("👥 grup", callback_data="panel_grup")],
+    ])
+
+def _panel_durum_msg():
+    return (
+        "Warren panel › durum\n\n"
+        "   ├ Bot\n"
+        "   ├ Piyasa\n"
+        "   └ Sinyal"
+    )
+
+def _panel_durum_kbd():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Bot", callback_data="cmd_durum_bot"),
+            InlineKeyboardButton("Piyasa", callback_data="cmd_durum_piyasa"),
+            InlineKeyboardButton("Sinyal", callback_data="cmd_durum_sinyal"),
+        ],
+        [InlineKeyboardButton("◀ geri", callback_data="panel")],
+    ])
+
+def _panel_analiz_msg():
+    return (
+        "Warren panel › analiz\n\n"
+        "   ├ XAUUSD\n"
+        "   ├ QQQ\n"
+        "   ├ EURUSD\n"
+        "   └ GBPUSD"
+    )
+
+_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
+
+def _panel_analiz_kbd():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("XAUUSD", callback_data="cmd_analiz_XAUUSD"),
+            InlineKeyboardButton("QQQ", callback_data="cmd_analiz_QQQ"),
+        ],
+        [
+            InlineKeyboardButton("EURUSD", callback_data="cmd_analiz_EURUSD"),
+            InlineKeyboardButton("GBPUSD", callback_data="cmd_analiz_GBPUSD"),
+        ],
+        [InlineKeyboardButton("◀ geri", callback_data="panel")],
+    ])
+
+def _panel_grup_msg():
+    return (
+        "Warren panel › grup\n\n"
+        "   ├ kick  ban  unban\n"
+        "   ├ mute  unmute\n"
+        "   └ uyar  uyarlar"
+    )
+
+def _panel_grup_kbd():
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Kick", callback_data="cmd_kick"),
             InlineKeyboardButton("Ban", callback_data="cmd_ban"),
             InlineKeyboardButton("Unban", callback_data="cmd_unban"),
+        ],
+        [
             InlineKeyboardButton("Mute", callback_data="cmd_mute"),
             InlineKeyboardButton("Unmute", callback_data="cmd_unmute"),
+        ],
+        [
             InlineKeyboardButton("Uyar", callback_data="cmd_uyar"),
             InlineKeyboardButton("Uyarlar", callback_data="cmd_uyarlar"),
         ],
+        [InlineKeyboardButton("◀ geri", callback_data="panel")],
     ])
 
 async def cmd_start(update, ctx):
-    msg = (
-        "Warren Bot V4 Aktif!\n====================\n"
-        "Asagidaki butonlari kullanabilirsiniz."
+    await update.message.reply_text(
+        _panel_main_msg(),
+        reply_markup=_panel_main_kbd()
     )
-    await update.message.reply_text(msg, reply_markup=_komutlar_klavye())
 
 async def cmd_komutlar(update, ctx):
     """Komut listesi (butonlu) - yardim ile karismasin diye"""
@@ -493,15 +566,36 @@ async def handle_button(update, ctx):
     q = update.callback_query
     await q.answer()
     data = q.data
-    if not data or not data.startswith("cmd_"):
-        return
-    cmd = data[4:]  # "cmd_durum" -> "durum"
     target = q.message
 
     async def reply(txt):
         await ctx.bot.send_message(chat_id=target.chat_id, text=txt)
 
-    if cmd == "durum":
+    async def edit_panel(msg, kbd):
+        try:
+            await q.edit_message_text(text=msg, reply_markup=kbd)
+        except Exception:
+            await reply(msg)
+
+    # Panel navigasyonu
+    if data == "panel":
+        await edit_panel(_panel_main_msg(), _panel_main_kbd())
+        return
+    if data == "panel_durum":
+        await edit_panel(_panel_durum_msg(), _panel_durum_kbd())
+        return
+    if data == "panel_analiz":
+        await edit_panel(_panel_analiz_msg(), _panel_analiz_kbd())
+        return
+    if data == "panel_grup":
+        await edit_panel(_panel_grup_msg(), _panel_grup_kbd())
+        return
+
+    if not data or not data.startswith("cmd_"):
+        return
+    cmd = data[4:]
+
+    if cmd == "durum" or cmd == "durum_bot":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
         son_analiz = str(last_daily_analiz) if last_daily_analiz else "Henuz yok"
         await reply(
@@ -512,26 +606,40 @@ async def handle_button(update, ctx):
             f"Sinyal  : {stats['total']}  WR: %{wr:.1f}\n"
             f"Son Analiz: {son_analiz}"
         )
+    elif cmd == "durum_piyasa":
+        await reply(
+            f"Piyasa  : {'Acik' if is_market_open() else 'KAPALI (Hafta Sonu)'}\n"
+            f"Seans   : {get_session()}\n"
+            f"Saat    : {datetime.utcnow().strftime('%H:%M UTC')}"
+        )
+    elif cmd == "durum_sinyal":
+        wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+        await reply(f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}")
+    elif cmd.startswith("analiz_"):
+        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
+        sym = m.get(cmd[7:], cmd[7:])
+        if sym not in SYMBOLS:
+            await reply("Gecersiz sembol.")
+            return
+        if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
+            return
+        await reply(f"{sym} analiz ediliyor...")
+        df = get_candles(sym, SYMBOLS[sym]["interval"], 50)
+        if df is None:
+            await reply("Veri alinamadi.")
+            return
+        sig = analyze_ict(df)
+        if sig:
+            await reply(format_signal(sym, sig))
+        else:
+            await reply(f"{sym}: Setup yok, bekleniyor...")
     elif cmd == "fiyat":
         lines = ["=== FIYATLAR ==="]
         for symbol, cfg in SYMBOLS.items():
             p = get_price(symbol)
             lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
         await reply("\n".join(lines))
-    elif cmd == "analiz":
-        if not is_admin(q.from_user.id):
-            await reply("Yetkin yok.")
-            return
-        await reply("XAUUSD analiz ediliyor...")
-        df = get_candles("XAU/USD", SYMBOLS["XAU/USD"]["interval"], 50)
-        if df is None:
-            await reply("Veri alinamadi.")
-            return
-        sig = analyze_ict(df)
-        if sig:
-            await reply(format_signal("XAU/USD", sig))
-        else:
-            await reply("XAUUSD: Setup yok, bekleniyor...")
     elif cmd == "sinyal":
         if not is_admin(q.from_user.id):
             await reply("Yetkin yok.")
