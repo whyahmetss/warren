@@ -18,6 +18,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import pandas as pd
 import numpy as np
+from ict_engine import analyze_ict_v2, get_active_session, is_in_kill_zone
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -36,16 +37,22 @@ FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "")  # financialmodelingprep.com 
 ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
-    "XAU/USD": {"name": "Gold",   "interval": "1min"},
-    "QQQ":     {"name": "US100",  "interval": "1min"},
-    "EUR/USD": {"name": "EURUSD", "interval": "1min"},
-    "GBP/USD": {"name": "GBPUSD", "interval": "1min"},
+    "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
+    "QQQ":      {"name": "US100",   "interval": "1min", "htf": "15min", "pip_val": 10},
+    "EUR/USD":  {"name": "EURUSD",  "interval": "1min", "htf": "15min", "pip_val": 100000},
+    "BTC/USD":  {"name": "BTCUSDT", "interval": "1min", "htf": "15min", "pip_val": 1},
 }
 
-COOLDOWN_MIN    = 30
-MIN_RR          = 2.0
-OB_LOOKBACK     = 20
-SIGNAL_INTERVAL = 60
+COOLDOWN_MIN     = 30
+MIN_RR           = 2.5
+MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
+MAX_DAILY_TRADES = 10
+RISK_PER_TRADE   = 0.01    # %1
+MAX_DAILY_RISK   = 0.03    # %3
+OB_LOOKBACK      = 20
+SIGNAL_INTERVAL  = 60
+daily_trade_count = 0
+daily_trade_date  = None
 
 stats            = {"total": 0, "win": 0, "loss": 0}
 stats_per_symbol = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}  # Sembol bazli istatistik
@@ -348,85 +355,10 @@ async def send_daily_analysis(app):
     last_daily_analiz = datetime.utcnow().date()
     log.info("Gunluk analiz gonderildi!")
 
-# ── ICT ANALİZ ───────────────────────────────────────────────
-def analyze_ict(df):
-    if df is None or len(df) < OB_LOOKBACK + 5:
-        return None
-
-    h = df["h"].values; l = df["l"].values
-    o = df["o"].values; c = df["c"].values
-    price = c[-1]; n = len(df)
-
-    swing_high = max(h[-OB_LOOKBACK:-1])
-    swing_low  = min(l[-OB_LOOKBACK:-1])
-
-    buy_sweep  = l[-2] < swing_low  and c[-2] > swing_low
-    sell_sweep = h[-2] > swing_high and c[-2] < swing_high
-
-    has_bull_ob = has_bear_ob = False
-    bull_ob_h = bull_ob_l = bear_ob_h = bear_ob_l = 0.0
-
-    for i in range(2, OB_LOOKBACK - 1):
-        idx = n - i - 1
-        if idx < 1: break
-        if c[idx] < o[idx] and not has_bull_ob:
-            if any(h[idx-j] > h[idx+1] for j in range(1, min(5, idx))):
-                has_bull_ob = True
-                bull_ob_h = max(o[idx], c[idx]); bull_ob_l = min(o[idx], c[idx])
-        if c[idx] > o[idx] and not has_bear_ob:
-            if any(l[idx-j] < l[idx+1] for j in range(1, min(5, idx))):
-                has_bear_ob = True
-                bear_ob_h = max(o[idx], c[idx]); bear_ob_l = min(o[idx], c[idx])
-
-    bull_fvg = bear_fvg = False
-    fvg_h = fvg_l = 0.0
-    for i in range(1, n - 2):
-        if l[i+1] > h[i-1]: bull_fvg = True; fvg_h = l[i+1]; fvg_l = h[i-1]; break
-        if h[i+1] < l[i-1]: bear_fvg = True; fvg_h = h[i+1]; fvg_l = l[i-1]; break
-
-    bull_bos = c[-1] > max(h[-8:-1])
-    bear_bos = c[-1] < min(l[-8:-1])
-
-    move_high = max(h[-OB_LOOKBACK:]); move_low = min(l[-OB_LOOKBACK:])
-    ote_high  = move_high - (move_high - move_low) * 0.62
-    ote_low   = move_high - (move_high - move_low) * 0.79
-    in_ote    = ote_low <= price <= ote_high
-
-    htf_bias  = 1 if c[-1] > c[n//2] else -1
-
-    bull_conf = []; bear_conf = []
-    if buy_sweep: bull_conf.append("Likidite Sweep")
-    if has_bull_ob and bull_ob_l <= price <= bull_ob_h * 1.002: bull_conf.append("Bullish OB")
-    if bull_fvg and fvg_l <= price <= fvg_h: bull_conf.append("Bullish FVG")
-    if bull_bos: bull_conf.append("BOS Yukari")
-    if in_ote:   bull_conf.append("OTE Zone")
-    if htf_bias == 1: bull_conf.append("HTF Bullish")
-
-    if sell_sweep: bear_conf.append("Likidite Sweep")
-    if has_bear_ob and bear_ob_l * 0.998 <= price <= bear_ob_h: bear_conf.append("Bearish OB")
-    if bear_fvg and fvg_l <= price <= fvg_h: bear_conf.append("Bearish FVG")
-    if bear_bos: bear_conf.append("BOS Asagi")
-    if htf_bias == -1: bear_conf.append("HTF Bearish")
-
-    direction = None; reasons = []
-    if len(bull_conf) >= 2 and htf_bias >= 0: direction = "LONG";  reasons = bull_conf
-    elif len(bear_conf) >= 2 and htf_bias <= 0: direction = "SHORT"; reasons = bear_conf
-    if not direction: return None
-
-    if direction == "LONG":
-        sl = swing_low  - (swing_high - swing_low) * 0.01
-        tp = price + (price - sl) * MIN_RR
-    else:
-        sl = swing_high + (swing_high - swing_low) * 0.01
-        tp = price - (sl - price) * MIN_RR
-
-    sl_pips = abs(price - sl); tp_pips = abs(tp - price)
-    rr = tp_pips / sl_pips if sl_pips > 0 else 0
-    if rr < MIN_RR: return None
-
-    return {"direction": direction, "price": price, "sl": sl, "tp": tp,
-            "sl_pips": sl_pips, "tp_pips": tp_pips, "rr": rr,
-            "conf": len(reasons), "reasons": reasons}
+# ── ICT ANALİZ (v2 engine kullanir) ──────────────────────────
+def analyze_ict(df, df_htf=None):
+    """analyze_ict_v2 wrapper - mevcut kodu bozmamak icin"""
+    return analyze_ict_v2(df, df_htf, min_rr=MIN_RR, min_confluence=MIN_CONFLUENCE)
 
 def is_market_open():
     now = datetime.utcnow()
@@ -434,37 +366,55 @@ def is_market_open():
     return True
 
 def get_session():
-    h = datetime.utcnow().hour
-    if 8  <= h < 12: return "London Kill Zone"
-    if 13 <= h < 17: return "New York Kill Zone"
-    if 0  <= h < 7:  return "Asya Seansi"
-    return "Normal Seans"
+    s = get_active_session()
+    return s or "Session Disi"
 
 def is_kill_zone():
-    s = get_session()
-    return s in ("London Kill Zone", "New York Kill Zone")
-
-def _sinyal_kalite(sig):
-    """Confluence sayisina gore A/B/C kalite etiketi"""
-    c = sig.get("conf", 0)
-    if c >= 4: return "🅰 A"
-    if c == 3: return "🅱 B"
-    return "© C"
+    return is_in_kill_zone()
 
 def format_signal(symbol, sig):
+    """Profesyonel ICT sinyal formati"""
     name = SYMBOLS.get(symbol, {}).get("name", symbol)
-    ico  = "LONG ^" if sig["direction"] == "LONG" else "SHORT v"
-    bar  = "+" * sig["conf"] + "-" * (6 - sig["conf"])
-    kalite = _sinyal_kalite(sig)
-    reasons_text = "\n".join(f"  + {r}" for r in sig["reasons"])
+    direction = sig["direction"]
+    conf = sig["conf"]
+    checks = sig.get("checks", {})
+    strength = sig.get("strength", "LOW")
+    session = sig.get("session", get_session())
+    rr = sig["rr"]
+
+    # Precision: XAUUSD 2 decimal, forex 5, BTC 1
+    prec = 2 if "XAU" in symbol else (1 if "BTC" in symbol else (1 if "QQQ" in symbol else 5))
+    p = lambda v: f"{v:.{prec}f}"
+
+    # Strength emoji
+    if strength == "HIGH":
+        str_emoji = "🔴 HIGH"
+    elif strength == "MEDIUM":
+        str_emoji = "🟡 MEDIUM"
+    else:
+        str_emoji = "🟢 LOW"
+
+    # Confluence detay
+    check_lines = []
+    for label, passed in checks.items():
+        mark = "✔" if passed else "✘"
+        check_lines.append(f"  {mark} {label}")
+    check_text = "\n".join(check_lines)
+
+    dir_emoji = "📈" if direction == "LONG" else "📉"
+
     return (
-        f"{'='*22}\n[{ico}] {name} ({symbol})  {kalite}\n{'='*22}\n"
-        f"Confluance [{bar}] {sig['conf']}/6\n{reasons_text}\n{'='*22}\n"
-        f"Giris  : {sig['price']:.4f}\n"
-        f"SL     : {sig['sl']:.4f}  (-{sig['sl_pips']:.1f})\n"
-        f"TP     : {sig['tp']:.4f}  (+{sig['tp_pips']:.1f})\n"
-        f"RR     : 1:{sig['rr']:.1f}\n{'='*22}\n"
-        f"Seans  : {get_session()}\nGiris karari SANA ait!"
+        f"📊 PAIR: {name}\n"
+        f"{dir_emoji} Direction: {direction}\n\n"
+        f"Confluence: {conf}/6\n"
+        f"{check_text}\n\n"
+        f"Entry: {p(sig['price'])}\n"
+        f"Stop: {p(sig['sl'])}\n"
+        f"TP: {p(sig['tp'])}\n\n"
+        f"RR: 1:{rr:.1f}\n\n"
+        f"Session: {session}\n"
+        f"Signal Strength: {str_emoji}\n\n"
+        f"⚠️ Giris karari sana ait!"
     )
 
 def _sinyal_butonlari(signal_id):
@@ -478,7 +428,7 @@ def _sinyal_butonlari(signal_id):
 
 # ── ANA DONGÜ ────────────────────────────────────────────────
 async def scan_loop(app):
-    global last_daily_analiz, last_daily_summary, last_weekly_summary
+    global last_daily_analiz, last_daily_summary, last_weekly_summary, daily_trade_count, daily_trade_date
     log.info("Ana dongü basladi")
 
     while True:
@@ -531,29 +481,40 @@ async def scan_loop(app):
         if not is_market_open():
             continue
 
-        # Kill Zone filtresi
-        if kill_zone_only and not is_kill_zone():
+        # Sadece Kill Zone'da trade
+        if not is_kill_zone():
+            continue
+
+        # Gunluk trade limiti reset
+        today = datetime.utcnow().date()
+        if daily_trade_date != today:
+            daily_trade_count = 0
+            daily_trade_date = today
+
+        if daily_trade_count >= MAX_DAILY_TRADES:
             continue
 
         for symbol, cfg in SYMBOLS.items():
             if symbol not in favori_semboller:
                 continue
+            if daily_trade_count >= MAX_DAILY_TRADES:
+                break
             try:
                 last = last_signal_time.get(symbol)
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
                     continue
-                df  = get_candles(symbol, cfg["interval"], 50)
-                sig = analyze_ict(df)
+                df_ltf = get_candles(symbol, cfg["interval"], 50)
+                df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+                sig = analyze_ict(df_ltf, df_htf)
                 if sig:
                     txt = format_signal(symbol, sig)
-                    # Kayip serisi uyarisi
                     if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
-                        txt = f"⚠️ *UYARI:* Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
+                        txt = f"⚠️ Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
                     sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
                     signal_tracking[sig_id] = {"symbol": symbol, "sig": sig, "time": datetime.utcnow()}
                     await app.bot.send_message(
                         chat_id=TG_CHAT_ID, text=txt,
-                        reply_markup=_sinyal_butonlari(sig_id), parse_mode="Markdown"
+                        reply_markup=_sinyal_butonlari(sig_id)
                     )
                     last_signal_time[symbol] = datetime.utcnow()
                     aktif_sinyaller[symbol] = {
@@ -564,7 +525,8 @@ async def scan_loop(app):
                         "time": datetime.utcnow()
                     }
                     stats["total"] += 1
-                    log.info(f"Sinyal: {symbol} {sig['direction']}")
+                    daily_trade_count += 1
+                    log.info(f"Sinyal [{sig.get('strength','?')}]: {symbol} {sig['direction']} conf={sig['conf']}/6 RR=1:{sig['rr']:.1f}")
             except Exception as e:
                 log.error(f"Scan hatasi {symbol}: {e}")
 
@@ -591,8 +553,11 @@ def _panel_main_kbd():
             InlineKeyboardButton("⏹ kapat", callback_data="cmd_kapat"),
         ],
         [
-            InlineKeyboardButton("👥 grup", callback_data="panel_grup"),
+            InlineKeyboardButton("📊 dashboard", callback_data="cmd_dashboard"),
             InlineKeyboardButton("📈 equity", callback_data="cmd_equity"),
+        ],
+        [
+            InlineKeyboardButton("👥 grup", callback_data="panel_grup"),
         ],
     ])
 
@@ -618,11 +583,11 @@ def _panel_analiz_kbd():
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("XAUUSD", callback_data="cmd_analiz_XAUUSD"),
-            InlineKeyboardButton("QQQ", callback_data="cmd_analiz_QQQ"),
+            InlineKeyboardButton("US100", callback_data="cmd_analiz_QQQ"),
         ],
         [
             InlineKeyboardButton("EURUSD", callback_data="cmd_analiz_EURUSD"),
-            InlineKeyboardButton("GBPUSD", callback_data="cmd_analiz_GBPUSD"),
+            InlineKeyboardButton("BTCUSDT", callback_data="cmd_analiz_BTCUSDT"),
         ],
         [InlineKeyboardButton("◀ geri", callback_data="panel")],
     ])
@@ -738,7 +703,7 @@ async def handle_button(update, ctx):
                 lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
         await reply("\n".join(lines))
     elif cmd.startswith("analiz_"):
-        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
+        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "BTCUSDT": "BTC/USD"}
         sym = m.get(cmd[7:], cmd[7:])
         if sym not in SYMBOLS:
             await reply("Gecersiz sembol.")
@@ -746,12 +711,14 @@ async def handle_button(update, ctx):
         if not is_admin(q.from_user.id):
             await reply("Yetkin yok.")
             return
+        cfg = SYMBOLS[sym]
         await reply(f"{sym} analiz ediliyor...")
-        df = get_candles(sym, SYMBOLS[sym]["interval"], 50)
-        if df is None:
+        df_ltf = get_candles(sym, cfg["interval"], 50)
+        df_htf = get_candles(sym, cfg.get("htf", "15min"), 30)
+        if df_ltf is None:
             await reply("Veri alinamadi.")
             return
-        sig = analyze_ict(df)
+        sig = analyze_ict(df_ltf, df_htf)
         if sig:
             await reply(format_signal(sym, sig))
         else:
@@ -803,6 +770,30 @@ async def handle_button(update, ctx):
             return
         bot_active = False
         await reply("Bot durduruldu. /ac ile baslatabilirsin.")
+    elif cmd == "dashboard":
+        session = get_session()
+        wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+        son10 = " ".join(("✅" if r == "W" else "❌") for r in results_history[-10:]) if results_history else "—"
+        aktif_list = []
+        for sym, s in aktif_sinyaller.items():
+            name = SYMBOLS.get(sym, {}).get("name", sym)
+            aktif_list.append(f"  {name} {s['direction']}")
+        aktif_text = "\n".join(aktif_list) if aktif_list else "  Yok"
+        perf_lines = []
+        for sym, s in stats_per_symbol.items():
+            if s["total"] > 0:
+                swr = s["win"] / s["total"] * 100
+                perf_lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']}T WR%{swr:.0f}")
+        perf_text = "\n".join(perf_lines) if perf_lines else "  —"
+        await reply(
+            f"━━ DASHBOARD ━━\n"
+            f"📡 {'Aktif' if bot_active else 'Kapali'} | {session}\n"
+            f"📊 Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
+            f"Toplam: {stats['total']} | ✅{stats['win']} ❌{stats['loss']} WR%{wr:.0f}\n"
+            f"Son 10: {son10}\n\n"
+            f"{perf_text}\n\n"
+            f"Aktif:\n{aktif_text}"
+        )
     elif cmd == "equity":
         uid = q.from_user.id
         kayitlar = pnl_db.get(uid, [])
@@ -859,11 +850,13 @@ async def cmd_analiz(update, ctx):
     symbol = (ctx.args[0].upper() if ctx.args else "XAU/USD")
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
-    await update.message.reply_text(f"{symbol} analiz ediliyor...")
-    df = get_candles(symbol, SYMBOLS[symbol]["interval"], 50)
-    if df is None:
+    cfg = SYMBOLS[symbol]
+    await update.message.reply_text(f"{symbol} analiz ediliyor (LTF: {cfg['interval']} + HTF: {cfg.get('htf','15min')})...")
+    df_ltf = get_candles(symbol, cfg["interval"], 50)
+    df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+    if df_ltf is None:
         await update.message.reply_text("Veri alinamadi."); return
-    sig = analyze_ict(df)
+    sig = analyze_ict(df_ltf, df_htf)
     if sig: await update.message.reply_text(format_signal(symbol, sig))
     else:   await update.message.reply_text(f"{symbol}: Setup yok, bekleniyor... ({get_session()})")
 
@@ -888,7 +881,9 @@ async def cmd_sinyal(update, ctx):
     await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
     last_signal_time = {}; found = False
     for symbol, cfg in scan_symbols.items():
-        df = get_candles(symbol, cfg["interval"], 50); sig = analyze_ict(df)
+        df_ltf = get_candles(symbol, cfg["interval"], 50)
+        df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+        sig = analyze_ict(df_ltf, df_htf)
         if sig:
             txt = format_signal(symbol, sig)
             if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
@@ -1233,6 +1228,57 @@ async def cmd_equity(update, ctx):
     except Exception as e:
         await update.message.reply_text(f"Grafik hatasi: {e}")
 
+# ── DASHBOARD ────────────────────────────────────────────────
+async def cmd_dashboard(update, ctx):
+    """Profesyonel trading dashboard"""
+    now = datetime.utcnow()
+    session = get_session()
+    wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+    toplam_rr = sum(1 for r in results_history if r == "W") * MIN_RR - sum(1 for r in results_history if r == "L")
+
+    # Aktif sinyaller
+    aktif_lines = []
+    for sym, s in aktif_sinyaller.items():
+        name = SYMBOLS.get(sym, {}).get("name", sym)
+        p = get_price(sym)
+        if p:
+            pnl_pips = abs(p - s["entry"])
+            emoji = "🟢" if (s["direction"] == "LONG" and p > s["entry"]) or (s["direction"] == "SHORT" and p < s["entry"]) else "🔴"
+            aktif_lines.append(f"  {emoji} {name} {s['direction']} | {pnl_pips:.1f} pip")
+    aktif_text = "\n".join(aktif_lines) if aktif_lines else "  Yok"
+
+    # Sembol bazli performans
+    perf_lines = []
+    for sym, s in stats_per_symbol.items():
+        if s["total"] > 0:
+            swr = s["win"] / s["total"] * 100
+            perf_lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym):8} {s['total']}T  W{s['win']} L{s['loss']}  WR%{swr:.0f}")
+    perf_text = "\n".join(perf_lines) if perf_lines else "  Henuz islem yok"
+
+    # Son 10 islem
+    son10 = " ".join(("✅" if r == "W" else "❌") for r in results_history[-10:]) if results_history else "—"
+
+    txt = (
+        f"━━━ WARREN DASHBOARD ━━━\n\n"
+        f"📡 Durum: {'Aktif' if bot_active else 'Kapali'}\n"
+        f"🕐 {now.strftime('%H:%M UTC')} | {session}\n"
+        f"📊 Gunluk Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
+        f"━━━ PERFORMANS ━━━\n"
+        f"Toplam: {stats['total']} | ✅{stats['win']} ❌{stats['loss']}\n"
+        f"Win Rate: %{wr:.1f}\n"
+        f"Net R: {toplam_rr:+.1f}R\n"
+        f"Son 10: {son10}\n\n"
+        f"━━━ SEMBOL BAZLI ━━━\n"
+        f"{perf_text}\n\n"
+        f"━━━ AKTİF SİNYALLER ━━━\n"
+        f"{aktif_text}\n\n"
+        f"━━━ AYARLAR ━━━\n"
+        f"Min RR: 1:{MIN_RR} | Min Conf: {MIN_CONFLUENCE}/6\n"
+        f"Risk: %{RISK_PER_TRADE*100:.0f}/trade | Max: %{MAX_DAILY_RISK*100:.0f}/gun\n"
+        f"Kill Zone Only: Evet"
+    )
+    await update.message.reply_text(txt)
+
 # ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
 async def cmd_haber(update, ctx):
     """Deepseek ile gold/nas haber sentiment analizi"""
@@ -1359,17 +1405,19 @@ async def cmd_backtest(update, ctx):
     args = ctx.args
     symbol = args[0].upper() if args else "XAU/USD"
 
-    if symbol not in SYMBOLS and symbol == "XAUUSD":
-        symbol = "XAU/USD"
-    elif symbol == "US100" or symbol == "NAS100":
-        symbol = "QQQ"
+    sym_map = {"XAUUSD": "XAU/USD", "US100": "QQQ", "NAS100": "QQQ", "BTCUSDT": "BTC/USD", "EURUSD": "EUR/USD"}
+    symbol = sym_map.get(symbol, symbol)
+    if symbol not in SYMBOLS:
+        await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
 
-    await update.message.reply_text(f"⏳ {symbol} için backtest çalışıyor... (100 mum)")
+    cfg = SYMBOLS[symbol]
+    await update.message.reply_text(f"⏳ {symbol} icin backtest calisiyor... (100 mum)")
 
     try:
         df = get_candles(symbol, "1min", 100)
+        df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
         if df is None or len(df) < 30:
-            await update.message.reply_text("❌ Veri alınamadı.")
+            await update.message.reply_text("❌ Veri alinamadi.")
             return
 
         wins = losses = 0
@@ -1378,7 +1426,7 @@ async def cmd_backtest(update, ctx):
 
         for i in range(20, len(df) - 5):
             parca = df.iloc[:i+1].reset_index(drop=True)
-            sig = analyze_ict(parca)
+            sig = analyze_ict(parca, df_htf)
             if not sig:
                 continue
 
@@ -1541,6 +1589,7 @@ async def main():
     app.add_handler(CommandHandler("uyar",       cmd_uyar))
     app.add_handler(CommandHandler("uyarlar",    cmd_uyarlar))
     app.add_handler(CommandHandler("haber",      cmd_haber))
+    app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
     app.add_handler(CommandHandler("takvim",     cmd_takvim))
     app.add_handler(CommandHandler("favori",     cmd_favori))
     app.add_handler(CommandHandler("alarm",      cmd_alarm))
