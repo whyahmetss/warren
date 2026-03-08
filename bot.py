@@ -17,9 +17,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import pandas as pd
 import numpy as np
-from telegram import Update, ChatPermissions
+from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
 
@@ -441,16 +441,137 @@ async def scan_loop(app):
 # ── KOMUTLAR ────────────────────────────────────────────────
 def is_admin(uid): return uid in ADMIN_IDS
 
-async def cmd_start(update, ctx):
-    await update.message.reply_text(
-        "Warren Bot V4 Aktif!\n====================\n"
-        "/durum /fiyat /analiz /sinyal /istatistik\n"
-        "/htfanaliz - Simdi gunluk analiz gonder\n"
-        "/ac /kapat\n====================\n"
-        "GRUP: /kick /ban /unban /mute /unmute /uyar /uyarlar"
-    )
+def _komutlar_klavye():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Durum", callback_data="cmd_durum"),
+            InlineKeyboardButton("💰 Fiyat", callback_data="cmd_fiyat"),
+            InlineKeyboardButton("📈 Analiz", callback_data="cmd_analiz"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Sinyal", callback_data="cmd_sinyal"),
+            InlineKeyboardButton("📉 İstatistik", callback_data="cmd_istatistik"),
+        ],
+        [
+            InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz"),
+            InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
+            InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+        ],
+        [
+            InlineKeyboardButton("Kick", callback_data="cmd_kick"),
+            InlineKeyboardButton("Ban", callback_data="cmd_ban"),
+            InlineKeyboardButton("Unban", callback_data="cmd_unban"),
+            InlineKeyboardButton("Mute", callback_data="cmd_mute"),
+            InlineKeyboardButton("Unmute", callback_data="cmd_unmute"),
+            InlineKeyboardButton("Uyar", callback_data="cmd_uyar"),
+            InlineKeyboardButton("Uyarlar", callback_data="cmd_uyarlar"),
+        ],
+    ])
 
-async def cmd_yardim(update, ctx): await cmd_start(update, ctx)
+async def cmd_start(update, ctx):
+    msg = (
+        "Warren Bot V4 Aktif!\n====================\n"
+        "Asagidaki butonlari kullanabilirsiniz."
+    )
+    await update.message.reply_text(msg, reply_markup=_komutlar_klavye())
+
+async def cmd_komutlar(update, ctx):
+    """Komut listesi (butonlu) - yardim ile karismasin diye"""
+    await cmd_start(update, ctx)
+
+async def _run_cmd_via_callback(update, ctx, cmd_fn):
+    """Callback icin: mesaj kaynagini cmd'ye uygun hale getir."""
+    q = update.callback_query
+    class _FakeUpdate:
+        message = q.message
+        effective_user = q.from_user
+        effective_chat = q.message.chat
+    await cmd_fn(_FakeUpdate(), ctx)
+
+async def handle_button(update, ctx):
+    global bot_active
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+    if not data or not data.startswith("cmd_"):
+        return
+    cmd = data[4:]  # "cmd_durum" -> "durum"
+    target = q.message
+
+    async def reply(txt):
+        await ctx.bot.send_message(chat_id=target.chat_id, text=txt)
+
+    if cmd == "durum":
+        wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+        son_analiz = str(last_daily_analiz) if last_daily_analiz else "Henuz yok"
+        await reply(
+            f"Durum   : {'Aktif' if bot_active else 'Kapali'}\n"
+            f"Piyasa  : {'Acik' if is_market_open() else 'KAPALI (Hafta Sonu)'}\n"
+            f"Seans   : {get_session()}\n"
+            f"Saat    : {datetime.utcnow().strftime('%H:%M UTC')}\n"
+            f"Sinyal  : {stats['total']}  WR: %{wr:.1f}\n"
+            f"Son Analiz: {son_analiz}"
+        )
+    elif cmd == "fiyat":
+        lines = ["=== FIYATLAR ==="]
+        for symbol, cfg in SYMBOLS.items():
+            p = get_price(symbol)
+            lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
+        await reply("\n".join(lines))
+    elif cmd == "analiz":
+        if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
+            return
+        await reply("XAUUSD analiz ediliyor...")
+        df = get_candles("XAU/USD", SYMBOLS["XAU/USD"]["interval"], 50)
+        if df is None:
+            await reply("Veri alinamadi.")
+            return
+        sig = analyze_ict(df)
+        if sig:
+            await reply(format_signal("XAU/USD", sig))
+        else:
+            await reply("XAUUSD: Setup yok, bekleniyor...")
+    elif cmd == "sinyal":
+        if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
+            return
+        await reply("Taranıyor...")
+        last_signal_time.clear()
+        found = False
+        for symbol, cfg in SYMBOLS.items():
+            df = get_candles(symbol, cfg["interval"], 50)
+            sig = analyze_ict(df)
+            if sig:
+                await reply(format_signal(symbol, sig))
+                stats["total"] += 1
+                last_signal_time[symbol] = datetime.utcnow()
+                found = True
+        if not found:
+            await reply("Setup yok, bekleniyor...")
+    elif cmd == "istatistik":
+        wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+        await reply(f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}")
+    elif cmd == "htfanaliz":
+        if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
+            return
+        await reply("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
+        await send_daily_analysis(ctx.application)
+    elif cmd == "ac":
+        if not is_admin(q.from_user.id):
+            return
+        bot_active = True
+        await reply("Bot aktif!")
+    elif cmd == "kapat":
+        if not is_admin(q.from_user.id):
+            return
+        bot_active = False
+        await reply("Bot durduruldu. /ac ile baslatabilirsin.")
+    elif cmd in ("kick", "ban", "unban", "mute", "unmute", "uyar", "uyarlar"):
+        if not is_admin(q.from_user.id):
+            return
+        await reply("Grup komutlari icin ilgili kisinin mesajina yanit verip /" + cmd + " yazin.")
 
 async def cmd_durum(update, ctx):
     wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
@@ -970,7 +1091,9 @@ async def main():
     app = Application.builder().token(TG_TOKEN).build()
 
     app.add_handler(CommandHandler("start",      cmd_start))
-    app.add_handler(CommandHandler("yardim",     cmd_yardim))
+    app.add_handler(CommandHandler("komutlar",   cmd_komutlar))
+    app.add_handler(CommandHandler("yardim",     cmd_komutlar))  # komutlar ile ayni (geri uyumluluk)
+    app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("durum",      cmd_durum))
     app.add_handler(CommandHandler("fiyat",      cmd_fiyat))
     app.add_handler(CommandHandler("analiz",     cmd_analiz))
