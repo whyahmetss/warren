@@ -63,6 +63,8 @@ EKONOMIK_OLAYLAR = [
     {"saat": "14:45", "olay": "PMI Verisi",               "gun": -1, "etki": "🟡 ORTA"},
     {"saat": "15:00", "olay": "ISM Verisi",               "gun": -1, "etki": "🟡 ORTA"},
 ]
+# Aktif sinyal takibi: {symbol: {"direction","entry","sl","tp","time","chat_id"}}
+aktif_sinyaller = {}
 son_takvim_uyari = None
 
 # ── KEEP ALIVE ───────────────────────────────────────────────
@@ -407,6 +409,10 @@ async def scan_loop(app):
 
         # Ekonomik takvim kontrolu
         await check_economic_calendar(app)
+
+        # TP/SL takip
+        if aktif_sinyaller:
+            await check_tp_sl(app)
         if not is_market_open():
             continue
 
@@ -420,6 +426,13 @@ async def scan_loop(app):
                 if sig:
                     await app.bot.send_message(chat_id=TG_CHAT_ID, text=format_signal(symbol, sig))
                     last_signal_time[symbol] = datetime.utcnow()
+                    aktif_sinyaller[symbol] = {
+                        "direction": sig["direction"],
+                        "entry": sig["price"],
+                        "sl": sig["sl"],
+                        "tp": sig["tp"],
+                        "time": datetime.utcnow()
+                    }
                     stats["total"] += 1
                     log.info(f"Sinyal: {symbol} {sig['direction']}")
             except Exception as e:
@@ -770,6 +783,149 @@ async def cmd_takvim(update, ctx):
 
     await update.message.reply_text(metin, parse_mode="Markdown")
 
+# ── TP/SL TAKİPÇİSİ ─────────────────────────────────────────
+async def check_tp_sl(app):
+    """Aktif sinyallerin TP/SL'e ulaşıp ulaşmadığını kontrol et"""
+    global aktif_sinyaller
+    kapatilacak = []
+
+    for symbol, sig in aktif_sinyaller.items():
+        price = get_price(symbol)
+        if not price:
+            continue
+
+        direction = sig["direction"]
+        tp = sig["tp"]
+        sl = sig["sl"]
+        entry = sig["entry"]
+        name = SYMBOLS.get(symbol, {}).get("name", symbol)
+
+        hit = None
+        if direction == "LONG":
+            if price >= tp:
+                hit = "TP"
+            elif price <= sl:
+                hit = "SL"
+        else:
+            if price <= tp:
+                hit = "TP"
+            elif price >= sl:
+                hit = "SL"
+
+        if hit:
+            pnl_pips = abs(tp - entry) if hit == "TP" else abs(sl - entry)
+            emoji = "✅" if hit == "TP" else "❌"
+            sonuc = "KAZANÇ" if hit == "TP" else "KAYIP"
+
+            if hit == "TP":
+                stats["win"] += 1
+            else:
+                stats["loss"] += 1
+
+            mesaj = (
+                f"{emoji} *{hit} HIT - {sonuc}*\n"
+                f"{'='*20}\n"
+                f"Sembol  : {name} ({symbol})\n"
+                f"Yön     : {direction}\n"
+                f"Giriş   : {entry:.4f}\n"
+                f"Kapanış : {price:.4f}\n"
+                f"Fark    : {pnl_pips:.1f} pip\n"
+                f"{'='*20}\n"
+                f"📊 Toplam: {stats['total']} | ✅{stats['win']} ❌{stats['loss']}"
+            )
+            try:
+                await app.bot.send_message(chat_id=TG_CHAT_ID, text=mesaj, parse_mode="Markdown")
+                log.info(f"{symbol} {hit} hit @ {price}")
+            except Exception as e:
+                log.error(f"TP/SL mesaj hatasi: {e}")
+            kapatilacak.append(symbol)
+
+    for s in kapatilacak:
+        aktif_sinyaller.pop(s, None)
+
+# ── BACKTEST ─────────────────────────────────────────────────
+async def cmd_backtest(update, ctx):
+    """Son 100 mumda ICT stratejisi backtesti"""
+    args = ctx.args
+    symbol = args[0].upper() if args else "XAU/USD"
+
+    if symbol not in SYMBOLS and symbol == "XAUUSD":
+        symbol = "XAU/USD"
+    elif symbol == "US100" or symbol == "NAS100":
+        symbol = "QQQ"
+
+    await update.message.reply_text(f"⏳ {symbol} için backtest çalışıyor... (100 mum)")
+
+    try:
+        df = get_candles(symbol, "1min", 100)
+        if df is None or len(df) < 30:
+            await update.message.reply_text("❌ Veri alınamadı.")
+            return
+
+        wins = losses = 0
+        toplam_rr = 0.0
+        islemler = []
+
+        for i in range(20, len(df) - 5):
+            parca = df.iloc[:i+1].reset_index(drop=True)
+            sig = analyze_ict(parca)
+            if not sig:
+                continue
+
+            entry = sig["price"]
+            tp = sig["tp"]
+            sl = sig["sl"]
+            direction = sig["direction"]
+
+            # Sonraki 5 mumda sonucu simüle et
+            gelecek = df.iloc[i+1:i+6]
+            sonuc = None
+            for _, mum in gelecek.iterrows():
+                if direction == "LONG":
+                    if mum["h"] >= tp:
+                        sonuc = "WIN"; break
+                    elif mum["l"] <= sl:
+                        sonuc = "LOSS"; break
+                else:
+                    if mum["l"] <= tp:
+                        sonuc = "WIN"; break
+                    elif mum["h"] >= sl:
+                        sonuc = "LOSS"; break
+
+            if sonuc == "WIN":
+                wins += 1
+                toplam_rr += sig["rr"]
+                islemler.append(("✅", sig["rr"]))
+            elif sonuc == "LOSS":
+                losses += 1
+                toplam_rr -= 1.0
+                islemler.append(("❌", -1.0))
+
+        toplam = wins + losses
+        wr = (wins / toplam * 100) if toplam else 0
+        ort_rr = (toplam_rr / toplam) if toplam else 0
+        name = SYMBOLS.get(symbol, {}).get("name", symbol)
+
+        son10 = " ".join(f"{e}" for e, _ in islemler[-10:]) if islemler else "Sinyal yok"
+
+        rapor = (
+            f"📊 *Backtest Raporu - {name}*\n"
+            f"{'='*24}\n"
+            f"Toplam İşlem : {toplam}\n"
+            f"Kazanan      : {wins} ✅\n"
+            f"Kaybeden     : {losses} ❌\n"
+            f"Win Rate     : %{wr:.1f}\n"
+            f"Ort. R:R     : {ort_rr:.2f}\n"
+            f"Net R        : {toplam_rr:+.1f}R\n"
+            f"{'='*24}\n"
+            f"Son 10: {son10}"
+        )
+        await update.message.reply_text(rapor, parse_mode="Markdown")
+
+    except Exception as e:
+        log.error(f"Backtest hatasi: {e}")
+        await update.message.reply_text(f"❌ Backtest hatası: {e}")
+
 async def check_economic_calendar(app):
     """Her saat basinda ekonomik takvim kontrolu"""
     global son_takvim_uyari
@@ -830,6 +986,7 @@ async def main():
     app.add_handler(CommandHandler("haber",      cmd_haber))
     app.add_handler(CommandHandler("takvim",     cmd_takvim))
     app.add_handler(CommandHandler("pnl",        cmd_pnl_dispatcher))
+    app.add_handler(CommandHandler("backtest",   cmd_backtest))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, spam_check), group=1)
 
