@@ -1457,7 +1457,6 @@ async def main():
 
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("komutlar",   cmd_komutlar))
-    app.add_handler(CommandHandler("yardim",     cmd_komutlar))  # komutlar ile ayni (geri uyumluluk)
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("durum",      cmd_durum))
     app.add_handler(CommandHandler("fiyat",      cmd_fiyat))
