@@ -39,8 +39,7 @@ ADMIN_IDS     = [6663913960]
 SYMBOLS = {
     "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "QQQ":      {"name": "US100",   "interval": "1min", "htf": "15min", "pip_val": 10},
-    "EUR/USD":  {"name": "EURUSD",  "interval": "1min", "htf": "15min", "pip_val": 100000},
-    "BTC/USD":  {"name": "BTCUSDT", "interval": "1min", "htf": "15min", "pip_val": 1},
+
 }
 
 COOLDOWN_MIN     = 30
