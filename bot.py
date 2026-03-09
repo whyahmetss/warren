@@ -22,7 +22,8 @@ from telegram.ext import (
 Application, CommandHandler, MessageHandler, CallbackQueryHandler,
 filters, ContextTypes
 )
-logging.basicConfig(format=”%(asctime)s | %(levelname)s | %(message)s”, level=logging.INFO)
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
+
 log = logging.getLogger(**name**)
 
 # ── AYARLAR ─────────────────────────────────────────────────
