@@ -1,11 +1,11 @@
-“””
+"""
 Warren Bot V4 - Full Python ICT Trading & Grup Yonetim Botu
 •	Twelve Data API ile gercek zamanli fiyat verisi
 •	ICT sinyal tarama
 •	DeepSeek AI ile gunluk HTF analiz (sabah 09:00 TR saati)
 •	Telegram grup yonetimi
 •	7/24 Render.com’da calisir
-“””
+"""
 import os
 import io
 import logging
