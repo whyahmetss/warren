@@ -46,7 +46,7 @@ SYMBOLS = {
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
-MAX_DAILY_TRADES = 10
+MAX_DAILY_TRADES = 9999  # Gunluk sinir kaldirildi
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
 OB_LOOKBACK      = 20
@@ -339,34 +339,46 @@ Neden? [3 sebep]
         log.error(f"Claude API istegi hatasi: {e}")
         return None
 
-async def send_daily_analysis(app):
-    """Sabah 09:00 TR saatinde gunluk analiz gonder"""
+async def send_daily_analysis(app, chat_id=None):
+    """Gunluk HTF analiz gonder. chat_id None ise TG_CHAT_ID (gruba) gider."""
     global last_daily_analiz
+    dest = chat_id or TG_CHAT_ID
     log.info("Gunluk analiz gonderiliyor...")
+
+    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+        try:
+            await app.bot.send_message(chat_id=dest, text="CLAUDE_API_KEY tanimli degil. Render Environment'a ekle.")
+        except: pass
+        return
 
     context = get_market_context()
     if not context:
-        await app.bot.send_message(chat_id=TG_CHAT_ID, text="Gunluk analiz icin veri alinamadi.")
+        try:
+            await app.bot.send_message(chat_id=dest, text="Gunluk analiz icin veri alinamadi (Twelve Data).")
+        except: pass
         return
 
-    # Her sembol icin ayri analiz
     for symbol_display in ["XAUUSD (Gold)", "NAS100 (QQQ)"]:
         analysis = generate_daily_analysis(symbol_display, context)
         if analysis:
-            # Telegram 4096 karakter limiti - uzunsa bolu
             if len(analysis) > 4000:
                 parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
                 for part in parts:
-                    await app.bot.send_message(chat_id=TG_CHAT_ID, text=part)
+                    try:
+                        await app.bot.send_message(chat_id=dest, text=part)
+                    except Exception as e:
+                        log.error(f"HTF analiz gonderim hatasi: {e}")
                     await asyncio.sleep(1)
             else:
-                await app.bot.send_message(chat_id=TG_CHAT_ID, text=analysis)
+                try:
+                    await app.bot.send_message(chat_id=dest, text=analysis)
+                except Exception as e:
+                    log.error(f"HTF analiz gonderim hatasi: {e}")
             await asyncio.sleep(2)
         else:
-            await app.bot.send_message(
-                chat_id=TG_CHAT_ID,
-                text=f"{symbol_display} analizi olusturulamadi. CLAUDE_API_KEY kontrol et."
-            )
+            try:
+                await app.bot.send_message(chat_id=dest, text=f"{symbol_display} analizi olusturulamadi.")
+            except: pass
 
     last_daily_analiz = datetime.utcnow().date()
     log.info("Gunluk analiz gonderildi!")
@@ -774,7 +786,7 @@ async def handle_button(update, ctx):
         await reply("\n".join(lines))
     elif cmd == "htfanaliz":
         await reply("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
-        await send_daily_analysis(ctx.application)
+        await send_daily_analysis(ctx.application, chat_id=target.chat_id)
     elif cmd == "ac":
         if not is_admin(q.from_user.id):
             return
@@ -839,6 +851,9 @@ async def handle_button(update, ctx):
             await reply(f"Grafik hatasi: {e}")
     elif cmd == "haber":
         await reply("📰 Haberler analiz ediliyor...")
+        if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+            await reply("CLAUDE_API_KEY tanimli degil. Render Environment'a ekle.")
+            return
         try:
             r = requests.post(
                 "https://api.anthropic.com/v1/messages",
@@ -850,13 +865,14 @@ async def handle_button(update, ctx):
                         "Piyasalari etkileyen guncel haberleri degerlendir. XAU/USD ve NAS100 icin:\n"
                         "1. Genel sentiment (Bullish/Bearish/Notr)\n2. Risk faktorleri\n3. Kisa vadeli firsat/tehdit\nKisa yaz."
                     )}]
-                }, timeout=30
+                }, timeout=60
             )
             data = r.json()
             if "content" in data and data["content"]:
                 await reply(f"📰 Haber Analizi\n\n{data['content'][0]['text']}")
             else:
-                await reply("Haber analizi alinamadi.")
+                err = data.get("error", {}).get("message", str(data))
+                await reply(f"Haber analizi alinamadi: {err}")
         except Exception as e:
             await reply(f"Hata: {e}")
     elif cmd in ("kick", "ban", "unban", "mute", "unmute", "uyar", "uyarlar"):
@@ -931,7 +947,7 @@ async def cmd_sinyal(update, ctx):
 async def cmd_htfanaliz(update, ctx):
     """Manuel gunluk analiz tetikle"""
     await update.message.reply_text("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
-    await send_daily_analysis(ctx.application)
+    await send_daily_analysis(ctx.application, chat_id=update.effective_chat.id)
 
 async def cmd_ac(update, ctx):
     global bot_active
@@ -1314,34 +1330,41 @@ async def cmd_dashboard(update, ctx):
 
 # ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
 async def cmd_haber(update, ctx):
-    """Deepseek ile gold/nas haber sentiment analizi"""
+    """Claude ile haber sentiment analizi"""
     await update.message.reply_text("📰 Haberler analiz ediliyor...")
 
+    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+        await update.message.reply_text("CLAUDE_API_KEY tanimli degil. Render Environment'a ekle.")
+        return
+
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-
-        now_tr = datetime.utcnow() + timedelta(hours=3)
-        tarih = now_tr.strftime("%d %B %Y %H:%M")
-
-        mesaj = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Tarih: {tarih} TR saati\n\n"
-                    "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
-                    "XAU/USD (Gold) ve NAS100 için:\n"
-                    "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
-                    "2. Risk faktörleri\n"
-                    "3. Kısa vadeli fırsat/tehdit\n\n"
-                    "Kısa ve ICT perspektifinden yorum yap."
-                )
-            }]
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-20250514", "max_tokens": 800,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Tarih: {(datetime.utcnow() + timedelta(hours=3)).strftime('%d %B %Y %H:%M')} TR\n\n"
+                        "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
+                        "XAU/USD (Gold) ve NAS100 için:\n"
+                        "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
+                        "2. Risk faktörleri\n"
+                        "3. Kısa vadeli fırsat/tehdit\n\n"
+                        "Kısa ve ICT perspektifinden yorum yap."
+                    )
+                }]
+            },
+            timeout=60
         )
-        analiz = mesaj.content[0].text
-        await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+        data = r.json()
+        if "content" in data and data["content"]:
+            analiz = data["content"][0]["text"]
+            await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+        else:
+            err = data.get("error", {}).get("message", str(data))
+            await update.message.reply_text(f"❌ Haber analizi alinamadi: {err}")
     except Exception as e:
         await update.message.reply_text(f"❌ Hata: {e}")
 
