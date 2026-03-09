@@ -46,7 +46,7 @@ SYMBOLS = {
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
-MAX_DAILY_TRADES = 10
+MAX_DAILY_TRADES = 100
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
 OB_LOOKBACK      = 20
