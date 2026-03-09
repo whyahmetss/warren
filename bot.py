@@ -38,7 +38,7 @@ ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
     "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
-    "US100":      {"name": "QQQ",   "interval": "1min", "htf": "15min", "pip_val": 10},
+    "QQQ":      {"name": "QQQ",   "interval": "1min", "htf": "15min", "pip_val": 10},
     "EUR/USD":  {"name": "EURUSD",  "interval": "1min", "htf": "15min", "pip_val": 100000},
     "BTC/USD":  {"name": "BTCUSD", "interval": "1min", "htf": "15min", "pip_val": 1},
 }
