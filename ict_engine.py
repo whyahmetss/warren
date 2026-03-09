@@ -458,7 +458,8 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=3):
 
     rr = tp_pips / sl_pips
 
-    if rr < min_rr:
+    # 1.1 RR uzun vadede kazandirmaz - min 1:2.5 sart
+    if rr < max(min_rr, 2.0):
         return None
 
     # 9. Kalite puani
