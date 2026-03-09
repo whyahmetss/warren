@@ -32,8 +32,8 @@ log = logging.getLogger(__name__)
 TG_TOKEN      = os.environ.get("TG_TOKEN",      "8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w")
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
 TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
-CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
-FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "")  # financialmodelingprep.com - ucretsiz key
+CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","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")
+FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "PKnIegSaPlq3drQSrsqYkO0bszb5cf2U")  # financialmodelingprep.com - ucretsiz key
 ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
