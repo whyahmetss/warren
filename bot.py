@@ -38,7 +38,7 @@ ADMIN_IDS     = [6663913960]
 
 SYMBOLS = {
     "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
-    "QQQ":      {"name": "QQQ",   "interval": "1min", "htf": "15min", "pip_val": 10},
+    "US100":      {"name": "QQQ",   "interval": "1min", "htf": "15min", "pip_val": 10},
     "EUR/USD":  {"name": "EURUSD",  "interval": "1min", "htf": "15min", "pip_val": 100000},
     "BTC/USD":  {"name": "BTCUSD", "interval": "1min", "htf": "15min", "pip_val": 1},
 }
@@ -46,7 +46,7 @@ SYMBOLS = {
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
-MAX_DAILY_TRADES = 100
+MAX_DAILY_TRADES = 10
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
 OB_LOOKBACK      = 20
