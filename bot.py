@@ -1348,3 +1348,4 @@ async def run_all():
     await asyncio.gather(health_server(), main())
 
 if __name__ == "__main__":
+    asyncio.run(run_all())
