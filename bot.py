@@ -512,6 +512,10 @@ async def scan_loop(app):
         if not is_market_open():
             continue
 
+        # Bot kapaliysa sinyal atma
+        if not bot_active:
+            continue
+
         # Sadece Kill Zone'da trade
         if not is_kill_zone():
             continue
@@ -540,6 +544,8 @@ async def scan_loop(app):
                 await asyncio.sleep(2)
                 sig = analyze_ict(df_ltf, df_htf)
                 if sig:
+                    if not bot_active:
+                        break
                     txt = format_signal(symbol, sig)
                     if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
                         txt = f"⚠️ Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
@@ -591,6 +597,7 @@ def _panel_main_kbd():
             InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz"),
             InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
             InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+            InlineKeyboardButton("🔄 Reset", callback_data="cmd_reset"),
         ],
         [
             InlineKeyboardButton("👥 Grup", callback_data="panel_grup"),
@@ -669,7 +676,7 @@ async def _run_cmd_via_callback(update, ctx, cmd_fn):
     await cmd_fn(_FakeUpdate(), ctx)
 
 async def handle_button(update, ctx):
-    global bot_active
+    global bot_active, daily_trade_count, daily_trade_date, last_signal_time
     q = update.callback_query
     await q.answer()
     data = q.data
@@ -789,14 +796,28 @@ async def handle_button(update, ctx):
         await send_daily_analysis(ctx.application, chat_id=target.chat_id)
     elif cmd == "ac":
         if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
             return
         bot_active = True
-        await reply("Bot aktif!")
+        await reply("Bot aktif! Sinyal taramasi devam ediyor.")
     elif cmd == "kapat":
         if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
             return
         bot_active = False
-        await reply("Bot durduruldu. /ac ile baslatabilirsin.")
+        await reply("Bot durduruldu. Sinyal atmayi birakti. /ac ile acabilirsin.")
+    elif cmd == "reset":
+        if not is_admin(q.from_user.id):
+            await reply("Yetkin yok.")
+            return
+        stats["total"] = stats["win"] = stats["loss"] = 0
+        for s in stats_per_symbol:
+            stats_per_symbol[s] = {"total": 0, "win": 0, "loss": 0}
+        results_history.clear()
+        daily_trade_count = 0
+        daily_trade_date = None
+        last_signal_time.clear()
+        await reply("Reset tamamlandi. Istatistikler ve gunluk sayac sifirlandi.")
     elif cmd == "dashboard":
         session = get_session()
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
@@ -951,13 +972,30 @@ async def cmd_htfanaliz(update, ctx):
 
 async def cmd_ac(update, ctx):
     global bot_active
-    if not is_admin(update.effective_user.id): return
-    bot_active = True; await update.message.reply_text("Bot aktif!")
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Yetkin yok."); return
+    bot_active = True
+    await update.message.reply_text("Bot aktif! Sinyal taramasi devam ediyor.")
 
 async def cmd_kapat(update, ctx):
     global bot_active
-    if not is_admin(update.effective_user.id): return
-    bot_active = False; await update.message.reply_text("Bot durduruldu. /ac ile baslatabilirsin.")
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Yetkin yok."); return
+    bot_active = False
+    await update.message.reply_text("Bot durduruldu. Sinyal atmayi birakti. /ac ile acabilirsin.")
+
+async def cmd_reset(update, ctx):
+    """Istatistikleri ve gunluk sayaci sifirla"""
+    global stats, stats_per_symbol, results_history, daily_trade_count, daily_trade_date, last_signal_time
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Yetkin yok."); return
+    stats = {"total": 0, "win": 0, "loss": 0}
+    stats_per_symbol = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}
+    results_history = []
+    daily_trade_count = 0
+    daily_trade_date = None
+    last_signal_time = {}
+    await update.message.reply_text("Reset tamamlandi. Istatistikler ve gunluk sayac sifirlandi.")
 
 # ── GRUP YÖNETİMİ ────────────────────────────────────────────
 async def get_target(update, ctx):
@@ -1698,6 +1736,7 @@ async def main():
     app.add_handler(CommandHandler("htfanaliz",  cmd_htfanaliz))
     app.add_handler(CommandHandler("ac",         cmd_ac))
     app.add_handler(CommandHandler("kapat",      cmd_kapat))
+    app.add_handler(CommandHandler("reset",      cmd_reset))
     app.add_handler(CommandHandler("kick",       cmd_kick))
     app.add_handler(CommandHandler("ban",        cmd_ban))
     app.add_handler(CommandHandler("unban",      cmd_unban))
