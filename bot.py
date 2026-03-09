@@ -510,8 +510,7 @@ async def scan_loop(app):
             daily_trade_count = 0
             daily_trade_date = today
 
-        if daily_trade_count >= MAX_DAILY_TRADES:
-            continue
+        
 
         for symbol, cfg in SYMBOLS.items():
             if symbol not in favori_semboller:
