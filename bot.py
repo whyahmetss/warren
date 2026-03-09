@@ -45,7 +45,7 @@ SYMBOLS = {
 
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
-MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
+MIN_CONFLUENCE   = 3       # Minimum confluence (3+ = Kill Zone setup)
 MAX_DAILY_TRADES = 9999  # Gunluk sinir kaldirildi
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
@@ -1558,8 +1558,8 @@ async def check_kill_zone_status(app):
         start_h = kz["start"]
         end_h = kz["end"]
 
-        # Acilis: tam saat basinda (dakika 0)
-        if h == start_h and m == 0:
+        # Acilis: saatin ilk 5 dakikasi (90sn cycle ile kacirmamak icin)
+        if h == start_h and m < 5:
             anahtar = f"acilis_{key}_{now_utc.date()}"
             if son_kz_durum == anahtar:
                 continue
@@ -1581,8 +1581,8 @@ async def check_kill_zone_status(app):
                 log.error(f"KZ acilis mesaj hatasi: {e}")
             return
 
-        # Kapanis: tam saat basinda (dakika 0)
-        if h == end_h and m == 0:
+        # Kapanis: kapanis saatini gecince ilk 5 dk
+        if h == end_h and m < 5:
             anahtar = f"kapanis_{key}_{now_utc.date()}"
             if son_kz_durum == anahtar:
                 continue

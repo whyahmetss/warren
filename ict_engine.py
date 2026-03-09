@@ -8,10 +8,11 @@ from datetime import datetime, timedelta
 
 # ── SESSION / KILL ZONE ──────────────────────────────────────
 
+# UTC saatleri. TR = UTC+3
 KILL_ZONES = {
-    "london":    {"start": 7, "end": 10,  "name": "London Kill Zone"},
-    "ny_open":   {"start": 12, "end": 15, "name": "New York Kill Zone"},
-    "ny_silver": {"start": 15, "end": 16, "name": "NY Silver Bullet"},
+    "london":     {"start": 7,  "end": 10, "name": "London Kill Zone"},      # 10:00-13:00 TR
+    "ny_open":    {"start": 12, "end": 16, "name": "New York Kill Zone"},    # 15:00-19:00 TR (NY acilis dahil)
+    "ny_silver":  {"start": 16, "end": 17, "name": "NY Silver Bullet"},      # 19:00-20:00 TR
 }
 
 def get_active_session():
@@ -321,7 +322,7 @@ def is_fake_breakout(h, l, c, o, lookback=10):
         wick_lower = min(c[i], o[i]) - l[i]
         total_wick = wick_upper + wick_lower
 
-        if body > 0 and total_wick > body * 3:
+        if body > 0 and total_wick > body * 5:  # Cok asiri wick = fake breakout
             return True
 
     return False
@@ -329,7 +330,7 @@ def is_fake_breakout(h, l, c, o, lookback=10):
 
 # ── VOLATILITY FILTER ────────────────────────────────────────
 
-def check_volatility(h, l, lookback=20, min_atr_mult=0.5, max_atr_mult=4.0):
+def check_volatility(h, l, lookback=20, min_atr_mult=0.2, max_atr_mult=5.0):
     """
     ATR bazli volatilite filtresi.
     Cok dusuk veya cok yuksek volatilitede trade yapma.
@@ -351,7 +352,7 @@ def check_volatility(h, l, lookback=20, min_atr_mult=0.5, max_atr_mult=4.0):
 
 # ── ANA ANALİZ FONKSİYONU ────────────────────────────────────
 
-def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
+def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=3):
     """
     Profesyonel ICT analiz. Multi-timeframe.
 
