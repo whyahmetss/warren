@@ -123,7 +123,7 @@ ICT_REQUIRE_CORE = os.environ.get("ICT_REQUIRE_CORE", "0").strip().lower() in ("
 RISK_PER_TRADE   = 0.01
 MAX_DAILY_RISK   = 0.03
 OB_LOOKBACK      = 20
-SIGNAL_INTERVAL  = 60
+SIGNAL_INTERVAL  = int(os.environ.get("SIGNAL_INTERVAL", "60"))
 
 stats             = {"total": 0, "win": 0, "loss": 0}
 stats_per_symbol  = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}
@@ -141,6 +141,7 @@ pnl_db            = {}
 aktif_sinyaller   = {}
 gonderilen_takvim_uyarilari = set()
 son_kz_durum      = None
+reject_reason_stats = {}
 _takvim_api_cache = {"date": None, "events": []}
 _htf_cache        = {}
 
@@ -626,6 +627,16 @@ def analyze_ict(df, df_htf=None):
         require_core=ICT_REQUIRE_CORE,
     )
 
+def analyze_ict_with_reason(df, df_htf=None):
+    return analyze_ict_v2(
+        df,
+        df_htf,
+        min_rr=MIN_RR,
+        min_confluence=MIN_CONFLUENCE,
+        require_core=ICT_REQUIRE_CORE,
+        debug=True,
+    )
+
 def is_market_open():
     return datetime.utcnow().weekday() < 5
 
@@ -698,7 +709,7 @@ async def scan_loop(app):
     log.info("Ana dongu basladi")
 
     while True:
-        await asyncio.sleep(90)
+        await asyncio.sleep(SIGNAL_INTERVAL)
 
         now_tr = datetime.utcnow() + timedelta(hours=3)
         bugun  = now_tr.date()
@@ -742,7 +753,9 @@ async def scan_loop(app):
         if aktif_sinyaller:
             await check_tp_sl(app)
 
-        if not is_market_open() or not bot_active or not is_kill_zone():
+        if not is_market_open() or not bot_active:
+            continue
+        if kill_zone_only and not is_kill_zone():
             continue
 
         for symbol, cfg in SYMBOLS.items():
@@ -754,7 +767,7 @@ async def scan_loop(app):
                 await asyncio.sleep(2)
                 df_htf = get_htf_cached(symbol, cfg.get("htf", "15min"), 30)
                 await asyncio.sleep(2)
-                sig = analyze_ict(df_ltf, df_htf)
+                sig, reason = analyze_ict_with_reason(df_ltf, df_htf)
                 if sig:
                     txt = format_signal(symbol, sig)
                     if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
@@ -772,6 +785,8 @@ async def scan_loop(app):
                     stats["total"] += 1
                     persist_save()
                     log.info(f"Sinyal: {symbol} {sig['direction']} conf={sig['conf']}/6 RR=1:{sig['rr']:.1f}")
+                else:
+                    reject_reason_stats[reason] = reject_reason_stats.get(reason, 0) + 1
             except Exception as e:
                 log.error(f"Scan hatasi {symbol}: {e}")
 
@@ -1205,7 +1220,7 @@ async def cmd_reset(update, ctx):
         await update.message.reply_text("Yetkin yok."); return
     stats = {"total": 0, "win": 0, "loss": 0}
     stats_per_symbol = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}
-    results_history = []; last_signal_time = {}; aktif_sinyaller.clear()
+    results_history = []; last_signal_time = {}; aktif_sinyaller.clear(); reject_reason_stats.clear()
     persist_save()
     await update.message.reply_text("🔄 Reset tamamlandı.")
 
@@ -1223,6 +1238,8 @@ async def cmd_dashboard(update, ctx):
     for s, v in aktif_sinyaller.items():
         aktif_lines.append(f"  {SYMBOLS.get(s,{}).get('name',s)} {v['direction']}")
     aktif = "\n".join(aktif_lines) or "  Yok"
+    reject_top = sorted(reject_reason_stats.items(), key=lambda x: x[1], reverse=True)[:3]
+    reject_txt = ", ".join(f"{k}:{v}" for k, v in reject_top) if reject_top else "yok"
     await update.message.reply_text(
         "-- WARREN DASHBOARD --\n\n"
         f"Bot: {'Aktif' if bot_active else 'Kapali'} | {get_session()}\n"
@@ -1231,6 +1248,8 @@ async def cmd_dashboard(update, ctx):
         f"{perf}\n\nAktif:\n{aktif}\n\n"
         f"Min RR: 1:{MIN_RR} | Min Conf: {MIN_CONFLUENCE}/6\n"
         f"Core Kural (Sweep+MSS): {'Açık' if ICT_REQUIRE_CORE else 'Kapalı'}\n"
+        f"Kill Zone Only: {'Açık' if kill_zone_only else 'Kapalı'}\n"
+        f"Reject Top: {reject_txt}\n"
         f"Risk: %{RISK_PER_TRADE*100:.0f}/trade"
     )
 
