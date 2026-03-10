@@ -860,8 +860,8 @@ async def handle_button(update, ctx):
         for sym, s in stats_per_symbol.items():
             if s["total"] > 0:
                 swr = s["win"] / s["total"] * 100
-                lines.append(f"  {SYMBOLS.get(sym,{}).get(\"name\",sym)}: {s[\"total\"]} | W{s[\"win\"]} L{s[\"loss\"]} WR %{swr:.1f}")
-        await reply("\\n".join(lines))
+                lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
+        await reply("\n".join(lines))
     elif cmd.startswith("analiz_"):
         sym = normalize_symbol(cmd[7:])
         if sym not in SYMBOLS:
@@ -1429,7 +1429,7 @@ async def cmd_mod(update, ctx):
     else:
         TRADE_MODE = "SWING" if TRADE_MODE == "SCALP" else "SCALP"
     cfg = MODE_CONFIG.get(TRADE_MODE, MODE_CONFIG["SCALP"])
-    await update.message.reply_text(f"Mod: {TRADE_MODE} | LTF: {cfg[\"interval\"]} HTF: {cfg[\"htf\"]}")
+    await update.message.reply_text(f"Mod: {TRADE_MODE} | LTF: {cfg['interval']} HTF: {cfg['htf']}")
 
 
 async def cmd_reset(update, ctx):
@@ -1934,3 +1934,55 @@ async def run_all():
 
 if __name__ == "__main__":
     asyncio.run(run_all())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
