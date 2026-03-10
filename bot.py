@@ -39,14 +39,14 @@ ADMIN_IDS     = [6663913960]
 SYMBOLS = {
     "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "QQQ":      {"name": "US100",   "interval": "1min", "htf": "15min", "pip_val": 10},
-    "EUR/USD":  {"name": "EURUSD",  "interval": "1min", "htf": "15min", "pip_val": 100000},
+    "XAG/USD":  {"name": "XAGUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "BTC/USD":  {"name": "BTCUSDT", "interval": "1min", "htf": "15min", "pip_val": 1},
 }
 
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
-MAX_DAILY_TRADES = 10
+MAX_DAILY_TRADES = 999
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
 OB_LOOKBACK      = 20
@@ -211,7 +211,7 @@ def get_htf_cached(symbol, interval="15min", outputsize=30):
 def get_market_context():
     """Claude'a verilecek piyasa verilerini hazirla"""
     context = {}
-    for symbol in ["XAU/USD", "QQQ", "EUR/USD"]:
+    for symbol in ["XAU/USD", "QQQ", "XAG/USD"]:
         price = get_price(symbol)
         daily = get_daily_candles(symbol, 10)
         if price and daily is not None:
@@ -601,7 +601,7 @@ def _panel_durum_kbd():
 def _panel_analiz_msg():
     return "Warren Panel › Analiz"
 
-_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD"}
+_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "XAGUSD": "XAG/USD", "GBPUSD": "GBP/USD"}
 
 def _panel_analiz_kbd():
     return InlineKeyboardMarkup([
@@ -610,7 +610,7 @@ def _panel_analiz_kbd():
             InlineKeyboardButton("📊 US100", callback_data="cmd_analiz_QQQ"),
         ],
         [
-            InlineKeyboardButton("💶 EURUSD", callback_data="cmd_analiz_EURUSD"),
+            InlineKeyboardButton("💶 XAGUSD", callback_data="cmd_analiz_XAGUSD"),
             InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSD"),
         ],
         [InlineKeyboardButton("◀ Geri", callback_data="panel")],
@@ -727,7 +727,7 @@ async def handle_button(update, ctx):
                 lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
         await reply("\n".join(lines))
     elif cmd.startswith("analiz_"):
-        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "BTCUSDT": "BTC/USD"}
+        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "XAGUSD": "XAG/USD", "GBPUSD": "GBP/USD", "BTCUSDT": "BTC/USD"}
         sym = m.get(cmd[7:], cmd[7:])
         if sym not in SYMBOLS:
             await reply("Gecersiz sembol.")
@@ -1189,7 +1189,7 @@ async def cmd_favori(update, ctx):
         k = a.upper().replace("/", "")
         if k in ("XAUUSD", "GOLD"): yeni.add("XAU/USD")
         elif k in ("QQQ", "US100", "NAS100"): yeni.add("QQQ")
-        elif k in ("EURUSD",): yeni.add("EUR/USD")
+        elif k in ("XAGUSD",): yeni.add("XAG/USD")
         elif k in ("GBPUSD",): yeni.add("GBP/USD")
     if yeni:
         favori_semboller = yeni
@@ -1206,10 +1206,10 @@ async def cmd_alarm(update, ctx):
     sym = ctx.args[0].upper().replace(" ", "/")
     if sym == "XAUUSD": sym = "XAU/USD"
     elif sym in ("QQQ", "US100"): sym = "QQQ"
-    elif sym == "EURUSD": sym = "EUR/USD"
+    elif sym == "XAGUSD": sym = "XAG/USD"
     elif sym == "GBPUSD": sym = "GBP/USD"
     if sym not in SYMBOLS:
-        await update.message.reply_text("Gecersiz sembol. XAUUSD, QQQ, EURUSD, GBPUSD")
+        await update.message.reply_text("Gecersiz sembol. XAUUSD, QQQ, XAGUSD, GBPUSD")
         return
     try:
         hedef = float(ctx.args[1])
@@ -1438,7 +1438,7 @@ async def cmd_backtest(update, ctx):
     args = ctx.args
     symbol = args[0].upper() if args else "XAU/USD"
 
-    sym_map = {"XAUUSD": "XAU/USD", "US100": "QQQ", "NAS100": "QQQ", "BTCUSDT": "BTC/USD", "EURUSD": "EUR/USD"}
+    sym_map = {"XAUUSD": "XAU/USD", "US100": "QQQ", "NAS100": "QQQ", "BTCUSDT": "BTC/USD", "XAGUSD": "XAG/USD"}
     symbol = sym_map.get(symbol, symbol)
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
