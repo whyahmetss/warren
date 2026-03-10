@@ -22,6 +22,8 @@ TG_TOKEN   = ...
 TG_CHAT_ID = ...
 TD_API_KEY = [Twelve Data'dan al]
 FMP_API_KEY = [financialmodelingprep.com - ucretsiz, ekonomik takvim icin]
+DEEPSEEK_API_KEY = [platform.deepseek.com API key]
+ICT_REQUIRE_CORE = 0 [1 yaparsan Sweep + MSS zorunlu calisir]
 
 ## 5. Deploy!
 "Create Web Service" → 2-3 dk bekle → bot calisiyor!
@@ -45,7 +47,7 @@ FMP_API_KEY = [financialmodelingprep.com - ucretsiz, ekonomik takvim icin]
 /uyarlar      - Uyari sayisini gor
 
 ## Otomatik Ozellikler
-- Her 60 saniyede Gold ve US100 taranir
-- ICT: OB + FVG + Sweep + BOS + OTE (min 2 confluance)
+- Tarama döngüsü varsayılan 60 sn (SIGNAL_INTERVAL)
+- ICT: 6 kontrol üzerinden min 3 confluence (varsayılan), strict modda Sweep+MSS zorunlu
 - Spam koruması: 10sn'de 8 mesaj = 5dk mute
 - Yeni uye karsilama mesaji
