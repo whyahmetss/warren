@@ -625,12 +625,12 @@ _SYMBOL_MAP = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "EURUSD": "EUR/USD", "GBPUSD":
 def _panel_analiz_kbd():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🥇 XAUUSD", callback_data="cmd_analiz_XAUUSD"),
-            InlineKeyboardButton("📊 US100", callback_data="cmd_analiz_QQQ"),
+            InlineKeyboardButton("🥇 ALTIN", callback_data="cmd_analiz_XAUUSD"),
+            InlineKeyboardButton("📊 NASDAQ", callback_data="cmd_analiz_QQQ"),
         ],
         [
-            InlineKeyboardButton("💶 EURUSD", callback_data="cmd_analiz_EURUSD"),
-            InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSD"),
+            InlineKeyboardButton("🪙 GÜMÜŞ", callback_data="cmd_analiz_EURUSD"),
+            InlineKeyboardButton("🦠BİTCOİN", callback_data="cmd_analiz_BTCUSD"),
         ],
         [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
