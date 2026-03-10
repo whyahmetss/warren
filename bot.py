@@ -104,6 +104,7 @@ SYMBOLS = {
     "XAU/USD": {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "QQQ":     {"name": "QQQ",     "interval": "1min", "htf": "15min", "pip_val": 10},
     "BTC/USD": {"name": "BTCUSD",  "interval": "5min", "htf": "1h",   "pip_val": 1},
+    "XAG/USD": {"name": "XAGUSD",  "interval": "5min", "htf": "1h",   "pip_val": 1},
 }
 
 # ── SEMBOL HARİTASI (panel butonları için) ───────────────────
@@ -112,11 +113,12 @@ SYMBOL_MAP = {
     "XAUUSD": "XAU/USD",
     "QQQ":    "QQQ",
     "BTCUSD": "BTC/USD",
+  "XAGUSD": "XAG/USD",
 }
 
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
-MIN_CONFLUENCE   = 4
+MIN_CONFLUENCE   = 3
 RISK_PER_TRADE   = 0.01
 MAX_DAILY_RISK   = 0.03
 OB_LOOKBACK      = 20
@@ -805,6 +807,7 @@ def _panel_analiz_kbd():
         [InlineKeyboardButton("🥇 ALTIN",   callback_data="cmd_analiz_XAUUSD"),
          InlineKeyboardButton("📊 NASDAQ",  callback_data="cmd_analiz_QQQ")],
         [InlineKeyboardButton("₿ BİTCOİN", callback_data="cmd_analiz_BTCUSD")],
+      [InlineKeyboardButton("🦾 GÜMÜŞ",   callback_data="cmd_analiz_XAGUSD"),
         [InlineKeyboardButton("◀ Geri",    callback_data="panel")],
     ])
 
@@ -1248,7 +1251,7 @@ async def cmd_alarm(update, ctx):
     if not ctx.args or len(ctx.args) < 3:
         await update.message.reply_text("Kullanım: /alarm SEMBOL FİYAT ust|alt"); return
     sym = ctx.args[0].upper().replace("/","")
-    sym_map = {"XAUUSD":"XAU/USD","QQQ":"QQQ","BTCUSD":"BTC/USD"}
+    sym_map = {"XAUUSD":"XAU/USD","QQQ":"QQQ","BTCUSD":"BTC/USD","XAGUSD":"XAG/USD"}
     sym = sym_map.get(sym, sym)
     if sym not in SYMBOLS:
         await update.message.reply_text("Geçersiz sembol."); return
@@ -1291,7 +1294,7 @@ async def cmd_equity(update, ctx):
 async def cmd_backtest(update, ctx):
     args   = ctx.args
     symbol = args[0].upper() if args else "XAU/USD"
-    sym_map= {"XAUUSD":"XAU/USD","US100":"QQQ","NAS100":"QQQ","BTCUSD":"BTC/USD"}
+    sym_map= {"XAUUSD":"XAU/USD","XAGUSD":"XAGUSD","NAS100":"QQQ","BTCUSD":"BTC/USD"}
     symbol = sym_map.get(symbol, symbol)
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Geçersiz. Seçenekler: {', '.join(SYMBOLS)}"); return
