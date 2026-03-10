@@ -6,24 +6,7 @@ Multi-timeframe analysis with proper MSS, FVG, OB, OTE, Liquidity Sweep detectio
 import numpy as np
 from datetime import datetime, timedelta
 
-# ── SESSION / KILL ZONE ──────────────────────────────────────
 
-KILL_ZONES = {
-    "london":    {"start": 7, "end": 10,  "name": "London Kill Zone"},
-    "ny_open":   {"start": 12, "end": 15, "name": "New York Kill Zone"},
-    "ny_silver": {"start": 15, "end": 16, "name": "NY Silver Bullet"},
-}
-
-def get_active_session():
-    """Aktif Kill Zone'u dondur (UTC bazli). None = session disi."""
-    h = datetime.utcnow().hour
-    for key, kz in KILL_ZONES.items():
-        if kz["start"] <= h < kz["end"]:
-            return kz["name"]
-    return None
-
-def is_in_kill_zone():
-    return get_active_session() is not None
 
 
 # ── SWING DETECTION ──────────────────────────────────────────
@@ -357,7 +340,7 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
 
     Args:
         df_ltf: LTF dataframe (1M veya 5M) - entry icin
-        df_htf: HTF dataframe (15M veya 1H) - bias icin
+        df_htf: HTF dataframe (1H veya 4H) - bias icin
         min_rr: Minimum Risk:Reward orani
         min_confluence: Minimum confluence puani (0-6)
 
@@ -373,10 +356,6 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
     c = df_ltf["c"].values.astype(float)
     price = float(c[-1])
 
-    # 1. Session filter
-    session = get_active_session()
-    if session is None:
-        return None
 
     # 2. Volatilite kontrolu
     vol = check_volatility(h, l)
