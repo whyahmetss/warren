@@ -529,24 +529,42 @@ def format_signal(symbol, sig):
     prec = 2 if "XAU" in symbol or "XAG" in symbol else (1 if "BTC" in symbol or "QQQ" in symbol else 5)
     p    = lambda v: f"{v:.{prec}f}"
 
-    str_emoji = {"HIGH": "🔴 HIGH", "MEDIUM": "🟡 MEDIUM"}.get(strength, "🟢 LOW")
-    dir_emoji = "📈" if direction == "LONG" else "📉"
+    str_label = {"HIGH": "YUKSEK", "MEDIUM": "ORTA"}.get(strength, "DUSUK")
+    dir_emoji = "LONG" if direction == "LONG" else "SHORT"
 
-    check_lines = [f"  {'✔' if passed else '✘'} {label}" for label, passed in checks.items()]
+    check_lines = []
+    for label, passed in checks.items():
+        mark = "OK" if passed else "--"
+        check_lines.append(f"  [{mark}] {label}")
 
-    return (
-        f"📊 PAIR: {name}\n"
-        f"{dir_emoji} Direction: {direction}\n\n"
-        f"Confluence: {conf}/6\n"
-        f"{chr(10).join(check_lines)}\n\n"
-        f"Entry: {p(sig['price'])}\n"
-        f"Stop:  {p(sig['sl'])}\n"
-        f"TP:    {p(sig['tp'])}\n\n"
-        f"RR: 1:{rr:.1f}\n\n"
-        f"Session: {session}\n"
-        f"Signal Strength: {str_emoji}\n\n"
-        f"⚠️ Giriş kararı sana ait!"
-    )
+    # Ekstra bilgiler
+    extras = []
+    if sig.get("macro_time"):
+        extras.append("Macro Window aktif")
+    if sig.get("fib_level"):
+        extras.append(f"Fib: {sig['fib_level']:.2f}")
+    htf_map = {1: "Bullish", -1: "Bearish", 0: "Notr"}
+    extras.append(f"HTF Bias: {htf_map.get(sig.get('htf_bias',0), 'Notr')}")
+    extra_line = " | ".join(extras)
+
+    lines = [
+        f"--- {name} {dir_emoji} SETUPi ---",
+        "",
+        "Confluence: " + str(conf) + "/6",
+        chr(10).join(check_lines),
+        "",
+        f"Entry : {p(sig['price'])}",
+        f"Stop  : {p(sig['sl'])}",
+        f"TP    : {p(sig['tp'])}",
+        f"RR    : 1:{rr:.1f}",
+        "",
+        f"Guc   : {str_label} ({conf}/6)",
+        f"Seans : {session}",
+        extra_line,
+        "",
+        "Giris karari sana ait. Risk max %1.",
+    ]
+    return chr(10).join(lines)
 
 def _sinyal_butonlari(signal_id):
     return InlineKeyboardMarkup([[
@@ -855,20 +873,29 @@ async def handle_button(update, ctx):
 
     # ── Dashboard
     elif cmd == "dashboard":
-        wr     = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-        son10  = " ".join("✅" if r == "W" else "❌" for r in results_history[-10:]) or "—"
-        aktif  = "\n".join(f"  {SYMBOLS.get(s,{}).get('name',s)} {v['direction']}" for s, v in aktif_sinyaller.items()) or "  Yok"
-        perf   = "\n".join(
-            f"  {SYMBOLS.get(s,{}).get('name',s)}: {v['total']}T W{v['win']} L{v['loss']} WR%{v['win']/v['total']*100:.0f}"
-            for s, v in stats_per_symbol.items() if v["total"] > 0
-        ) or "  —"
-        await reply(
-            f"━━ DASHBOARD ━━\n"
-            f"📡 {'Aktif' if bot_active else 'Kapalı'} | {get_session()}\n"
-            f"📊 Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
-            f"W:{stats['win']} L:{stats['loss']} WR%{wr:.0f}\nSon 10: {son10}\n\n"
+        wr    = stats["win"] / stats["total"] * 100 if stats["total"] else 0
+        son10 = " ".join("W" if r == "W" else "L" for r in results_history[-10:]) or "-"
+        aktif_lines = []
+        for s, v in aktif_sinyaller.items():
+            name = SYMBOLS.get(s, {}).get("name", s)
+            aktif_lines.append(f"  {name} {v['direction']}")
+        aktif = "\n".join(aktif_lines) or "  Yok"
+        perf_lines = []
+        for s, v in stats_per_symbol.items():
+            if v["total"] > 0:
+                swr = v["win"] / v["total"] * 100
+                name = SYMBOLS.get(s, {}).get("name", s)
+                perf_lines.append(f"  {name}: {v['total']}T W{v['win']} L{v['loss']} WR%{swr:.0f}")
+        perf = "\n".join(perf_lines) or "  Henuz islem yok"
+        msg = (
+            "-- WARREN DASHBOARD --\n\n"
+            f"Bot: {'Aktif' if bot_active else 'Kapali'} | {get_session()}\n"
+            f"Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
+            f"W:{stats['win']} L:{stats['loss']} WR%{wr:.0f}\n"
+            f"Son 10: {son10}\n\n"
             f"{perf}\n\nAktif:\n{aktif}"
         )
+        await reply(msg)
 
     # ── Equity
     elif cmd == "equity":
@@ -1036,20 +1063,27 @@ async def cmd_reset(update, ctx):
 
 async def cmd_dashboard(update, ctx):
     wr    = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-    son10 = " ".join("✅" if r == "W" else "❌" for r in results_history[-10:]) or "—"
-    perf  = "\n".join(
-        f"  {SYMBOLS.get(s,{}).get('name',s)}: {v['total']}T W{v['win']} L{v['loss']} WR%{v['win']/v['total']*100:.0f}"
-        for s, v in stats_per_symbol.items() if v["total"] > 0
-    ) or "  Henüz işlem yok"
-    aktif = "\n".join(f"  {SYMBOLS.get(s,{}).get('name',s)} {v['direction']}" for s, v in aktif_sinyaller.items()) or "  Yok"
+    son10 = " ".join("W" if r == "W" else "L" for r in results_history[-10:]) or "-"
+    perf_lines = []
+    for s, v in stats_per_symbol.items():
+        if v["total"] > 0:
+            swr  = v["win"] / v["total"] * 100
+            name = SYMBOLS.get(s, {}).get("name", s)
+            perf_lines.append(f"  {name}: {v['total']}T W{v['win']} L{v['loss']} WR%{swr:.0f}")
+    perf  = "\n".join(perf_lines) or "  Henuz islem yok"
+    aktif_lines = []
+    for s, v in aktif_sinyaller.items():
+        aktif_lines.append(f"  {SYMBOLS.get(s,{}).get('name',s)} {v['direction']}")
+    aktif = "\n".join(aktif_lines) or "  Yok"
     await update.message.reply_text(
-        f"━━ WARREN DASHBOARD ━━\n"
-        f"📡 {'Aktif' if bot_active else 'Kapalı'} | {get_session()}\n"
-        f"📊 Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
+        "-- WARREN DASHBOARD --\n\n"
+        f"Bot: {'Aktif' if bot_active else 'Kapali'} | {get_session()}\n"
+        f"Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
         f"Toplam: {stats['total']} W:{stats['win']} L:{stats['loss']} WR%{wr:.1f}\n"
-        f"Son 10: {son10}\n\n{perf}\n\nAktif:\n{aktif}\n\n"
+        f"Son 10: {son10}\n\n"
+        f"{perf}\n\nAktif:\n{aktif}\n\n"
         f"Min RR: 1:{MIN_RR} | Min Conf: {MIN_CONFLUENCE}/6\n"
-        f"Risk: %{RISK_PER_TRADE*100:.0f}/trade | Kill Zone Only: Evet"
+        f"Risk: %{RISK_PER_TRADE*100:.0f}/trade"
     )
 
 async def cmd_takvim(update, ctx):
