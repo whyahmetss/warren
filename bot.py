@@ -18,7 +18,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import pandas as pd
 import numpy as np
-from ict_engine import analyze_ict_v2, get_active_session, is_in_kill_zone
+from ict_engine import analyze_ict_v2, get_active_session, 
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
