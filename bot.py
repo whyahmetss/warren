@@ -119,6 +119,7 @@ SYMBOL_MAP = {
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 3
+ICT_REQUIRE_CORE = os.environ.get("ICT_REQUIRE_CORE", "0").strip().lower() in ("1", "true", "yes", "on")
 RISK_PER_TRADE   = 0.01
 MAX_DAILY_RISK   = 0.03
 OB_LOOKBACK      = 20
@@ -617,7 +618,13 @@ async def send_daily_analysis(app, chat_id=None):
 # ── ICT WRAPPER ──────────────────────────────────────────────
 
 def analyze_ict(df, df_htf=None):
-    return analyze_ict_v2(df, df_htf, min_rr=MIN_RR, min_confluence=MIN_CONFLUENCE)
+    return analyze_ict_v2(
+        df,
+        df_htf,
+        min_rr=MIN_RR,
+        min_confluence=MIN_CONFLUENCE,
+        require_core=ICT_REQUIRE_CORE,
+    )
 
 def is_market_open():
     return datetime.utcnow().weekday() < 5
@@ -1223,6 +1230,7 @@ async def cmd_dashboard(update, ctx):
         f"Son 10: {son10}\n\n"
         f"{perf}\n\nAktif:\n{aktif}\n\n"
         f"Min RR: 1:{MIN_RR} | Min Conf: {MIN_CONFLUENCE}/6\n"
+        f"Core Kural (Sweep+MSS): {'Açık' if ICT_REQUIRE_CORE else 'Kapalı'}\n"
         f"Risk: %{RISK_PER_TRADE*100:.0f}/trade"
     )
 
