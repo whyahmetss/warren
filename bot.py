@@ -2,7 +2,7 @@
 Warren Bot V4 - Full Python ICT Trading & Grup Yonetim Botu
 - Twelve Data API ile gercek zamanli fiyat verisi
 - ICT sinyal tarama
-- Claude AI ile gunluk HTF analiz (sabah 09:00 TR saati)
+- DeepSeek AI ile gunluk HTF analiz (sabah 09:00 TR saati)
 - Telegram grup yonetimi
 - 7/24 Render.com'da calisir
 """
@@ -30,22 +30,29 @@ log = logging.getLogger(__name__)
 TG_TOKEN      = os.environ.get("TG_TOKEN")
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
 TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
-CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
 FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "")  # financialmodelingprep.com - ucretsiz key
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 ADMIN_IDS     = [6663913960]
 PORT          = int(os.environ.get("PORT", "8080"))
 
-SYMBOLS = {
-    "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
-    "QQQ":      {"name": "US100",   "interval": "1min", "htf": "15min", "pip_val": 10},
-    "XAG/USD":  {"name": "XAGUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
-    "BTC/USD":  {"name": "BTCUSDT", "interval": "1min", "htf": "15min", "pip_val": 1},
+MODE_CONFIG = {
+    "SCALP": {"interval": "1min", "htf": "15min"},
+    "SWING": {"interval": "15min", "htf": "4h"},
 }
+TRADE_MODE = "SCALP"
+SELECTED_SYMBOL = "XAU/USD"
 
+SYMBOLS = {
+    "XAU/USD":  {"name": "XAUUSD",  "pip_val": 100},
+    "QQQ":      {"name": "US100",   "pip_val": 10},
+    "XAG/USD":  {"name": "XAGUSD",  "pip_val": 100},
+    "BTC/USD":  {"name": "BTCUSD", "pip_val": 1},
+}
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4       # Minimum confluence puani (0-6, 4+ = trade)
-MAX_DAILY_TRADES = 999
+MAX_DAILY_TRADES = 10
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
 OB_LOOKBACK      = 20
@@ -89,6 +96,96 @@ _htf_cache = {}  # {symbol: (timestamp, df)} - Twelve Data 8/dk limit icin HTF 1
 if not TG_TOKEN:
     raise RuntimeError("TG_TOKEN ortam degiskeni zorunlu. Lutfen env'e ekleyin.")
 
+trade_history = {s: [] for s in SYMBOLS}
+
+
+def normalize_symbol(token):
+    if not token:
+        return None
+    k = token.upper().replace("/", "").replace(" ", "")
+    if k in ("XAUUSD", "GOLD"):
+        return "XAU/USD"
+    if k in ("QQQ", "US100", "NAS100"):
+        return "QQQ"
+    if k in ("XAGUSD", "SILVER"):
+        return "XAG/USD"
+    if k in ("BTCUSD", "BTCUSD", "BTC"):
+        return "BTC/USD"
+    if k in ("XAGUSD", "SİLVER"):
+        return "XAG/USD"
+    return token if token in SYMBOLS else None
+
+
+def get_symbol_cfg(symbol):
+    base = SYMBOLS.get(symbol)
+    if not base:
+        return None
+    mode = MODE_CONFIG.get(TRADE_MODE, MODE_CONFIG["SCALP"])
+    cfg = dict(base)
+    cfg.update(mode)
+    return cfg
+
+
+def _set_selected_symbol(symbol):
+    global SELECTED_SYMBOL
+    if symbol in SYMBOLS:
+        SELECTED_SYMBOL = symbol
+
+
+def _record_trade_open(symbol, sig, trade_id):
+    entry = {
+        "id": trade_id,
+        "status": "OPEN",
+        "direction": sig["direction"],
+        "entry": float(sig["price"]),
+        "sl": float(sig["sl"]),
+        "tp": float(sig["tp"]),
+        "open_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        "close_time": None,
+        "close_price": None,
+        "result": None,
+    }
+    trade_history.setdefault(symbol, []).append(entry)
+    trade_history[symbol] = trade_history[symbol][-50:]
+
+
+def _record_trade_close(symbol, trade_id, hit, price):
+    items = trade_history.setdefault(symbol, [])
+    for item in reversed(items):
+        if item.get("id") == trade_id:
+            item["status"] = "CLOSED"
+            item["close_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+            item["close_price"] = float(price)
+            item["result"] = hit
+            return
+    items.append({
+        "id": trade_id,
+        "status": "CLOSED",
+        "direction": "",
+        "entry": None,
+        "sl": None,
+        "tp": None,
+        "open_time": None,
+        "close_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        "close_price": float(price),
+        "result": hit,
+    })
+    trade_history[symbol] = trade_history[symbol][-50:]
+
+
+def format_trade_history(symbol, limit=5):
+    items = trade_history.get(symbol, [])
+    if not items:
+        return f"{symbol} icin islem yok."
+    recent = items[-limit:]
+    lines = [f"{symbol} | Son {len(recent)} islem"]
+    for t in reversed(recent):
+        status = "Açık" if t["status"] == "OPEN" else "Kapali"
+        res = t.get("result") or "-"
+        entry = f"{t['entry']:.4f}" if t.get("entry") is not None else "-"
+        close = f"{t['close_price']:.4f}" if t.get("close_price") is not None else "-"
+        lines.append(f"{status} {t.get('direction','')} | G:{entry} K:{close} | {res}")
+    return "\n".join(lines)
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
 def get_economic_calendar_api():
     """FMP API'den bugunun ekonomik olaylarini al. Bos/None = fallback kullan."""
@@ -214,11 +311,11 @@ async def aget_htf_cached(symbol, interval="15min", outputsize=30):
 async def aget_economic_calendar_api():
     return await asyncio.to_thread(get_economic_calendar_api)
 
-# ── CLAUDE AI - GUNLUK ANALİZ ───────────────────────────────
-async def get_market_context():
-    """Claude'a verilecek piyasa verilerini hazirla"""
+# ── DEEPSEEK - GUNLUK ANALİZ ───────────────────────────────
+async def get_market_context(symbols):
+    """DeepSeek'e verilecek piyasa verilerini hazirla"""
     context = {}
-    for symbol in ["XAU/USD", "QQQ", "XAG/USD"]:
+    for symbol in symbols:
         price = await aget_price(symbol)
         daily = await aget_daily_candles(symbol, 10)
         if price and daily is not None:
@@ -236,33 +333,63 @@ async def get_market_context():
             }
     return context
 
-def generate_daily_analysis(symbol_display, context_data):
-    """Claude API ile gunluk HTF analiz olustur"""
-    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+
+def _deepseek_chat(messages, max_tokens=800):
+    if not DEEPSEEK_API_KEY:
+        return None
+    try:
+        r = requests.post(
+            DEEPSEEK_API_URL,
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": messages,
+                "max_tokens": max_tokens
+            },
+            timeout=30
+        )
+        data = r.json()
+        if "choices" in data and data["choices"]:
+            return data["choices"][0]["message"]["content"]
+        log.error(f"DeepSeek API hatasi: {data}")
+        return None
+    except Exception as e:
+        log.error(f"DeepSeek istek hatasi: {e}")
+        return None
+
+
+def generate_daily_analysis(symbol, context_data):
+    """DeepSeek ile gunluk HTF analiz olustur"""
+    if not DEEPSEEK_API_KEY:
+        return None
+
+    if symbol not in context_data:
         return None
 
     now_tr = datetime.utcnow() + timedelta(hours=3)
     tarih  = now_tr.strftime("%d %B %Y - %A")
+    symbol_name = SYMBOLS.get(symbol, {}).get("name", symbol)
 
-    # Piyasa verisini stringe cevir
-    piyasa_str = ""
-    for sym, data in context_data.items():
-        piyasa_str += f"{sym}: Fiyat={data['price']}, Trend={data['trend']}, 5gun High={data['high5']}, 5gun Low={data['low5']}\n"
+    data = context_data[symbol]
+    piyasa_str = f"{symbol}: Fiyat={data['price']}, Trend={data['trend']}, 5gun High={data['high5']}, 5gun Low={data['low5']}\n"
 
-    prompt = f"""Sen bir ICT (Inner Circle Trader) piyasa analiz botusun. Asagidaki verilere gore {symbol_display} icin bugun ({tarih}) gunluk HTF analiz yaz.
+    prompt = f"""Sen bir ICT (Inner Circle Trader) piyasa analiz botusun. Asagidaki verilere gore {symbol_name} icin bugun ({tarih}) gunluk HTF analiz yaz.
 
 MEVCUT PIYASA VERILERI:
 {piyasa_str}
 
 ONEMLI: Sinyal botu degilsin.
-- "XYZ fiyatindan LONG AL" deme
-- "Kesin kazanc" deme
+- \"XYZ fiyatindan LONG AL\" deme
+- \"Kesin kazanc\" deme
 - HTF bias + seviyeler + nedenlerini acikla
 - Kullanici kendi kararini versin
 
 Asagidaki FORMATTA Turkce analiz yaz (emojileri kullan):
 
-📊 {symbol_display} - HTF ANALIZ
+📊 {symbol_name} - HTF ANALIZ
 📅 {tarih}
 ━━━━━━━━━━━━━━━━━━━━━━
 📈 YAPISAL ANALIZ
@@ -323,68 +450,37 @@ Neden? [3 sebep]
 ━━━━━━━━━━━━━━━━━━━━━━"""
 
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 2000,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30
-        )
-        data = r.json()
-        if "content" in data and data["content"]:
-            return data["content"][0]["text"]
-        log.error(f"Claude API hatasi: {data}")
-        return None
+        messages = [{"role": "user", "content": prompt}]
+        return _deepseek_chat(messages, max_tokens=2000)
     except Exception as e:
-        log.error(f"Claude API istegi hatasi: {e}")
+        log.error(f"DeepSeek analiz hatasi: {e}")
         return None
+
 
 def _fetch_haber_analysis(prompt):
-    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+    if not DEEPSEEK_API_KEY:
         return None
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 800,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=30
-        )
-        data = r.json()
-        if "content" in data and data["content"]:
-            return data["content"][0]["text"]
-        log.error(f"Haber analizi API hatasi: {data}")
-        return None
+        messages = [{"role": "user", "content": prompt}]
+        return _deepseek_chat(messages, max_tokens=800)
     except Exception as e:
-        log.error(f"Haber analizi istegi hatasi: {e}")
+        log.error(f"DeepSeek haber hatasi: {e}")
         return None
 
-async def send_daily_analysis(app):
+
+async def send_daily_analysis(app, symbols=None):
     """Sabah 09:00 TR saatinde gunluk analiz gonder"""
     global last_daily_analiz
     log.info("Gunluk analiz gonderiliyor...")
-    context = await get_market_context()
+    symbols = symbols or list(favori_semboller)
+    context = await get_market_context(symbols)
     if not context:
         await app.bot.send_message(chat_id=TG_CHAT_ID, text="Gunluk analiz icin veri alinamadi.")
         return
 
     # Her sembol icin ayri analiz
-    for symbol_display in ["XAUUSD (Gold)", "NAS100 (QQQ)"]:
-        analysis = await asyncio.to_thread(generate_daily_analysis, symbol_display, context)
+    for symbol in symbols:
+        analysis = await asyncio.to_thread(generate_daily_analysis, symbol, context)
         if analysis:
             # Telegram 4096 karakter limiti - uzunsa bolu
             if len(analysis) > 4000:
@@ -398,12 +494,11 @@ async def send_daily_analysis(app):
         else:
             await app.bot.send_message(
                 chat_id=TG_CHAT_ID,
-                text=f"{symbol_display} analizi olusturulamadi. CLAUDE_API_KEY kontrol et."
+                text=f"{symbol} analizi olusturulamadi. DeepSeek ayarlarini kontrol et."
             )
 
     last_daily_analiz = datetime.utcnow().date()
     log.info("Gunluk analiz gonderildi!")
-
 # ── ICT ANALİZ (v2 engine kullanir) ──────────────────────────
 def analyze_ict(df, df_htf=None):
     """analyze_ict_v2 wrapper - mevcut kodu bozmamak icin"""
@@ -549,11 +644,14 @@ async def scan_loop(app):
         if daily_trade_count >= MAX_DAILY_TRADES:
             continue
 
-        for symbol, cfg in SYMBOLS.items():
+        for symbol in SYMBOLS:
             if symbol not in favori_semboller:
                 continue
             if daily_trade_count >= MAX_DAILY_TRADES:
                 break
+            cfg = get_symbol_cfg(symbol)
+            if not cfg:
+                continue
             try:
                 last = last_signal_time.get(symbol)
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
@@ -575,12 +673,14 @@ async def scan_loop(app):
                     )
                     last_signal_time[symbol] = datetime.utcnow()
                     aktif_sinyaller[symbol] = {
+                        "id": sig_id,
                         "direction": sig["direction"],
                         "entry": sig["price"],
                         "sl": sig["sl"],
                         "tp": sig["tp"],
                         "time": datetime.utcnow()
                     }
+                    _record_trade_open(symbol, sig, sig_id)
                     stats["total"] += 1
                     daily_trade_count += 1
                     log.info(f"Sinyal [{sig.get('strength','?')}]: {symbol} {sig['direction']} conf={sig['conf']}/6 RR=1:{sig['rr']:.1f}")
@@ -600,23 +700,23 @@ def _panel_main_kbd():
             InlineKeyboardButton("🖥 Analiz", callback_data="panel_analiz"),
         ],
         [
-            InlineKeyboardButton("💰 Fiyat", callback_data="cmd_fiyat"),
             InlineKeyboardButton("🔍 Sinyal", callback_data="cmd_sinyal"),
-        ],
-        [
             InlineKeyboardButton("📊 Dashboard", callback_data="cmd_dashboard"),
-            InlineKeyboardButton("📰 Haberler", callback_data="cmd_haber"),
         ],
         [
-            InlineKeyboardButton("📈 Equity", callback_data="cmd_equity"),
+            InlineKeyboardButton("📰 Haberler", callback_data="cmd_haber"),
             InlineKeyboardButton("📉 İstatistik", callback_data="cmd_istatistik"),
         ],
         [
             InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz"),
-            InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
-            InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+            InlineKeyboardButton("🧭 Mod", callback_data="cmd_mod"),
         ],
         [
+            InlineKeyboardButton("🔁 Reset", callback_data="cmd_reset"),
+            InlineKeyboardButton("▶ Aç", callback_data="cmd_ac"),
+        ],
+        [
+            InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
             InlineKeyboardButton("👥 Grup", callback_data="panel_grup"),
         ],
     ])
@@ -646,8 +746,8 @@ def _panel_analiz_kbd():
             InlineKeyboardButton("📊 US100", callback_data="cmd_analiz_QQQ"),
         ],
         [
-            InlineKeyboardButton("💶 XAGUSD", callback_data="cmd_analiz_XAGUSD"),
-            InlineKeyboardButton("₿ BTCUSDT", callback_data="cmd_analiz_BTCUSD"),
+            InlineKeyboardButton(" XAGUSD", callback_data="cmd_analiz_XAGUSD"),
+            InlineKeyboardButton(" BTCUSD", callback_data="cmd_analiz_BTCUSD"),
         ],
         [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
@@ -693,7 +793,7 @@ async def _run_cmd_via_callback(update, ctx, cmd_fn):
     await cmd_fn(_FakeUpdate(), ctx)
 
 async def handle_button(update, ctx):
-    global bot_active
+    global bot_active, TRADE_MODE, daily_trade_count, daily_trade_date, SELECTED_SYMBOL
     q = update.callback_query
     await q.answer()
     data = q.data
@@ -756,19 +856,19 @@ async def handle_button(update, ctx):
         )
     elif cmd == "durum_sinyal":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-        lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
+        lines = [f"Toplam: {stats[\"total\"]}  Kazan: {stats[\"win\"]}  Kaybet: {stats[\"loss\"]}\\nWR: %{wr:.1f}", "\\n*Sembol bazli:*"]
         for sym, s in stats_per_symbol.items():
             if s["total"] > 0:
                 swr = s["win"] / s["total"] * 100
-                lines.append(f"  {SYMBOLS.get(sym,{}).get('name',sym)}: {s['total']} | W{s['win']} L{s['loss']} WR %{swr:.1f}")
-        await reply("\n".join(lines))
+                lines.append(f"  {SYMBOLS.get(sym,{}).get(\"name\",sym)}: {s[\"total\"]} | W{s[\"win\"]} L{s[\"loss\"]} WR %{swr:.1f}")
+        await reply("\\n".join(lines))
     elif cmd.startswith("analiz_"):
-        m = {"XAUUSD": "XAU/USD", "QQQ": "QQQ", "XAGUSD": "XAG/USD", "GBPUSD": "GBP/USD", "BTCUSDT": "BTC/USD"}
-        sym = m.get(cmd[7:], cmd[7:])
+        sym = normalize_symbol(cmd[7:])
         if sym not in SYMBOLS:
             await reply("Gecersiz sembol.")
             return
-        cfg = SYMBOLS[sym]
+        _set_selected_symbol(sym)
+        cfg = get_symbol_cfg(sym)
         await reply(f"{sym} analiz ediliyor...")
         df_ltf = await aget_candles(sym, cfg["interval"], 50)
         df_htf = await aget_candles(sym, cfg.get("htf", "15min"), 30)
@@ -780,26 +880,9 @@ async def handle_button(update, ctx):
             await reply(format_signal(sym, sig))
         else:
             await reply(f"{sym}: Setup yok, bekleniyor...")
-    elif cmd == "fiyat":
-        lines = ["=== FIYATLAR ==="]
-        for symbol, cfg in SYMBOLS.items():
-            p = await aget_price(symbol)
-            lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
-        await reply("\n".join(lines))
     elif cmd == "sinyal":
-        await reply("Taranıyor...")
-        last_signal_time.clear()
-        found = False
-        for symbol, cfg in SYMBOLS.items():
-            df = await aget_candles(symbol, cfg["interval"], 50)
-            sig = analyze_ict(df)
-            if sig:
-                await reply(format_signal(symbol, sig))
-                stats["total"] += 1
-                last_signal_time[symbol] = datetime.utcnow()
-                found = True
-        if not found:
-            await reply("Setup yok, bekleniyor...")
+        symbol = SELECTED_SYMBOL if SELECTED_SYMBOL in SYMBOLS else next(iter(SYMBOLS))
+        await reply(format_trade_history(symbol, limit=5))
     elif cmd == "istatistik":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
         lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
@@ -810,7 +893,23 @@ async def handle_button(update, ctx):
         await reply("\n".join(lines))
     elif cmd == "htfanaliz":
         await reply("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
-        await send_daily_analysis(ctx.application)
+        symbol = SELECTED_SYMBOL if SELECTED_SYMBOL in SYMBOLS else next(iter(SYMBOLS))
+        await send_daily_analysis(ctx.application, [symbol])
+    elif cmd == "haber":
+        symbol = SELECTED_SYMBOL if SELECTED_SYMBOL in SYMBOLS else next(iter(SYMBOLS))
+        await send_haber(ctx.bot, target.chat_id, symbol)
+    elif cmd == "mod":
+        if not is_admin(q.from_user.id):
+            return
+        TRADE_MODE = "SWING" if TRADE_MODE == "SCALP" else "SCALP"
+        cfg = MODE_CONFIG.get(TRADE_MODE, MODE_CONFIG["SCALP"])
+        await reply(f"Mod: {TRADE_MODE} | LTF: {cfg['interval']} HTF: {cfg['htf']}")
+    elif cmd == "reset":
+        if not is_admin(q.from_user.id):
+            return
+        daily_trade_count = 0
+        daily_trade_date = datetime.utcnow().date()
+        await reply("Gunluk trade limiti sifirlandi.")
     elif cmd == "ac":
         if not is_admin(q.from_user.id):
             return
@@ -913,19 +1012,25 @@ async def cmd_fiyat(update, ctx):
     await update.message.reply_text("\n".join(lines))
 
 async def cmd_analiz(update, ctx):
-    symbol = (ctx.args[0].upper() if ctx.args else "XAU/USD")
+    symbol = normalize_symbol(ctx.args[0]) if ctx.args else SELECTED_SYMBOL
     if symbol not in SYMBOLS:
-        await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
-    cfg = SYMBOLS[symbol]
-    await update.message.reply_text(f"{symbol} analiz ediliyor (LTF: {cfg['interval']} + HTF: {cfg.get('htf','15min')})...")
+        await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}")
+        return
+    _set_selected_symbol(symbol)
+    cfg = get_symbol_cfg(symbol)
+    await update.message.reply_text(
+        f"{symbol} analiz ediliyor (Mod: {TRADE_MODE} | LTF: {cfg['interval']} + HTF: {cfg.get('htf','15min')})..."
+    )
     df_ltf = await aget_candles(symbol, cfg["interval"], 50)
     df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
     if df_ltf is None:
-        await update.message.reply_text("Veri alinamadi."); return
+        await update.message.reply_text("Veri alinamadi.")
+        return
     sig = analyze_ict(df_ltf, df_htf)
-    if sig: await update.message.reply_text(format_signal(symbol, sig))
-    else:   await update.message.reply_text(f"{symbol}: Setup yok, bekleniyor... ({get_session()})")
-
+    if sig:
+        await update.message.reply_text(format_signal(symbol, sig))
+    else:
+        await update.message.reply_text(f"{symbol}: Setup yok, bekleniyor... ({get_session()})")
 async def cmd_istatistik(update, ctx):
     wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
     lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
@@ -937,40 +1042,59 @@ async def cmd_istatistik(update, ctx):
 
 async def cmd_sinyal(update, ctx):
     global last_signal_time
-    req = " ".join(ctx.args).upper().replace(" ", "/") if ctx.args else None
-    if req and req not in SYMBOLS:
-        mevcut = ", ".join(SYMBOLS.keys())
-        await update.message.reply_text("Bilinmeyen sembol: " + req + "\nMevcut: " + mevcut); return
-    scan_symbols = {req: SYMBOLS[req]} if req else SYMBOLS
-    await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
-    last_signal_time = {}; found = False
-    for symbol, cfg in scan_symbols.items():
-        df_ltf = await aget_candles(symbol, cfg["interval"], 50)
-        df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
-        sig = analyze_ict(df_ltf, df_htf)
-        if sig:
-            txt = format_signal(symbol, sig)
-            if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
-                txt = f"⚠️ *UYARI:* Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
-            sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
-            await update.message.reply_text(txt, reply_markup=_sinyal_butonlari(sig_id), parse_mode="Markdown")
-            stats["total"] += 1; last_signal_time[symbol] = datetime.utcnow(); found = True
-    if not found: await update.message.reply_text("Setup yok, bekleniyor...")
+
+    if ctx.args and ctx.args[0].lower() in ("tara", "scan"):
+        symbol_arg = normalize_symbol(ctx.args[1]) if len(ctx.args) > 1 else None
+        scan_symbols = [symbol_arg] if symbol_arg else list(favori_semboller)
+        await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols)}...")
+        last_signal_time = {}
+        found = False
+        for symbol in scan_symbols:
+            cfg = get_symbol_cfg(symbol)
+            if not cfg:
+                continue
+            df_ltf = await aget_candles(symbol, cfg["interval"], 50)
+            df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
+            sig = analyze_ict(df_ltf, df_htf)
+            if sig:
+                txt = format_signal(symbol, sig)
+                if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
+                    txt = f"⚠️ *UYARI:* Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
+                sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
+                await update.message.reply_text(txt, reply_markup=_sinyal_butonlari(sig_id), parse_mode="Markdown")
+                stats["total"] += 1
+                last_signal_time[symbol] = datetime.utcnow()
+                found = True
+        if not found:
+            await update.message.reply_text("Setup yok, bekleniyor...")
+        return
+
+    symbol = normalize_symbol(ctx.args[0]) if ctx.args else SELECTED_SYMBOL
+    if symbol not in SYMBOLS:
+        await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}")
+        return
+    _set_selected_symbol(symbol)
+    await update.message.reply_text(format_trade_history(symbol, limit=5))
 
 async def cmd_htfanaliz(update, ctx):
     """Manuel gunluk analiz tetikle"""
+    symbol = SELECTED_SYMBOL if SELECTED_SYMBOL in SYMBOLS else next(iter(SYMBOLS))
     await update.message.reply_text("Gunluk HTF analiz hazirlaniyor, 30 saniye bekle...")
-    await send_daily_analysis(ctx.application)
+    await send_daily_analysis(ctx.application, [symbol])
 
 async def cmd_ac(update, ctx):
-    global bot_active
-    if not is_admin(update.effective_user.id): return
-    bot_active = True; await update.message.reply_text("Bot aktif!")
+    global bot_active, TRADE_MODE, daily_trade_count, daily_trade_date, SELECTED_SYMBOL
+    if not is_admin(update.effective_user.id):
+        return
+    bot_active = True
+    await update.message.reply_text("Bot aktif!")
 
 async def cmd_kapat(update, ctx):
-    global bot_active
-    if not is_admin(update.effective_user.id): return
-    bot_active = False; await update.message.reply_text("Bot durduruldu. /ac ile baslatabilirsin.")
+    global bot_active, TRADE_MODE, daily_trade_count, daily_trade_date, SELECTED_SYMBOL
+    if not is_admin(update.effective_user.id):
+        return
+    bot_active = False
+    await update.message.reply_text("Bot durduruldu. /ac ile baslatabilirsin.")
 
 # ── GRUP YÖNETİMİ ────────────────────────────────────────────
 async def get_target(update, ctx, user_token=None):
@@ -1246,19 +1370,19 @@ async def cmd_favori(update, ctx):
         return
     yeni = set()
     for a in args:
-        k = a.upper().replace("/", "")
-        if k in ("XAUUSD", "GOLD"): yeni.add("XAU/USD")
-        elif k in ("QQQ", "US100", "NAS100"): yeni.add("QQQ")
-        elif k in ("XAGUSD",): yeni.add("XAG/USD")
-        elif k in ("GBPUSD",): yeni.add("GBP/USD")
+        sym = normalize_symbol(a)
+        if sym:
+            yeni.add(sym)
     if yeni:
         favori_semboller = yeni
+        if SELECTED_SYMBOL not in favori_semboller:
+            _set_selected_symbol(next(iter(favori_semboller)))
         await update.message.reply_text(f"Favori: {', '.join(SYMBOLS.get(s,{}).get('name',s) for s in favori_semboller)}")
     else:
         favori_semboller = set(SYMBOLS.keys())
         await update.message.reply_text("Favori: Tum semboller")
 
-async def cmd_alarm(update, ctx):
+async def cmd_alarm(update, ctx):(update, ctx):
     """//alarm XAUUSD 2650 ust - Fiyat 2650'ye ulasinca uyari"""
     if not ctx.args or len(ctx.args) < 3:
         await update.message.reply_text("Kullanim: /alarm SEMBOL FIYAT ust|alt\nOrnek: /alarm XAUUSD 2650 ust")
@@ -1290,6 +1414,33 @@ async def cmd_seans(update, ctx):
     kill_zone_only = not kill_zone_only
     durum = "acik" if kill_zone_only else "kapali"
     await update.message.reply_text(f"Kill Zone filtresi: {durum}")
+
+async def cmd_mod(update, ctx):
+    """Trade modu degistir: /mod scalp|swing"""
+    global TRADE_MODE
+    if not is_admin(update.effective_user.id):
+        return
+    if ctx.args:
+        arg = ctx.args[0].lower()
+        if arg in ("scalp", "s"):
+            TRADE_MODE = "SCALP"
+        elif arg in ("swing", "w"):
+            TRADE_MODE = "SWING"
+    else:
+        TRADE_MODE = "SWING" if TRADE_MODE == "SCALP" else "SCALP"
+    cfg = MODE_CONFIG.get(TRADE_MODE, MODE_CONFIG["SCALP"])
+    await update.message.reply_text(f"Mod: {TRADE_MODE} | LTF: {cfg[\"interval\"]} HTF: {cfg[\"htf\"]}")
+
+
+async def cmd_reset(update, ctx):
+    """Gunluk trade limitini sifirla"""
+    global daily_trade_count, daily_trade_date
+    if not is_admin(update.effective_user.id):
+        return
+    daily_trade_count = 0
+    daily_trade_date = datetime.utcnow().date()
+    await update.message.reply_text("Gunluk trade limiti sifirlandi.")
+
 
 async def cmd_equity(update, ctx):
     """Equity curve grafigi - PnL verisinden"""
@@ -1373,29 +1524,40 @@ async def cmd_dashboard(update, ctx):
     await update.message.reply_text(txt)
 
 # ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
-async def cmd_haber(update, ctx):
-    """Haber sentiment analizi"""
-    await update.message.reply_text("📰 Haberler analiz ediliyor...")
-
+async def send_haber(bot, chat_id, symbol):
+    """Parite bazli haber sentiment analizi"""
+    await asyncio.sleep(0)
     now_tr = datetime.utcnow() + timedelta(hours=3)
+    symbol_name = SYMBOLS.get(symbol, {}).get("name", symbol)
     prompt = (
         f"Tarih: {now_tr.strftime('%d %B %Y %H:%M')} TR saati\n\n"
+        f"Sembol: {symbol_name}\n\n"
         "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
-        "XAU/USD (Gold) ve NAS100 için:\n"
+        "Aşağıdakileri kısa ve ICT perspektifinden yaz:\n"
         "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
         "2. Risk faktörleri\n"
-        "3. Kısa vadeli fırsat/tehdit\n\n"
-        "Kısa ve ICT perspektifinden yorum yap."
+        "3. Kısa vadeli fırsat/tehdit"
     )
 
     try:
         analiz = await asyncio.to_thread(_fetch_haber_analysis, prompt)
         if analiz:
-            await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+            await bot.send_message(chat_id=chat_id, text=f"📰 *Haber Sentiment Analizi* ({symbol_name})\n\n{analiz}", parse_mode="Markdown")
         else:
-            await update.message.reply_text("Haber analizi alinamadi.")
+            await bot.send_message(chat_id=chat_id, text="Haber analizi alinamadi.")
     except Exception as e:
-        await update.message.reply_text(f"❌ Hata: {e}")
+        await bot.send_message(chat_id=chat_id, text=f"❌ Hata: {e}")
+
+
+async def cmd_haber(update, ctx):
+    """Parite bazli haber sentiment analizi"""
+    symbol = normalize_symbol(ctx.args[0]) if ctx.args else SELECTED_SYMBOL
+    if symbol not in SYMBOLS:
+        await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}")
+        return
+    _set_selected_symbol(symbol)
+    await update.message.reply_text("📰 Haberler analiz ediliyor...")
+    await send_haber(ctx.bot, update.effective_chat.id, symbol)
 
 async def cmd_takvim(update, ctx):
     """Bugunun onemli ekonomik olaylarini goster"""
@@ -1427,7 +1589,6 @@ async def check_tp_sl(app):
         sl = sig["sl"]
         entry = sig["entry"]
         name = SYMBOLS.get(symbol, {}).get("name", symbol)
-
         hit = None
         if direction == "LONG":
             if price >= tp:
@@ -1441,6 +1602,9 @@ async def check_tp_sl(app):
                 hit = "SL"
 
         if hit:
+            trade_id = sig.get("id")
+            if trade_id:
+                _record_trade_close(symbol, trade_id, hit, price)
             pnl_pips = abs(tp - entry) if hit == "TP" else abs(sl - entry)
             emoji = "✅" if hit == "TP" else "❌"
             sonuc = "KAZANÇ" if hit == "TP" else "KAYIP"
@@ -1489,16 +1653,19 @@ async def cmd_backtest(update, ctx):
     args = ctx.args
     symbol = args[0].upper() if args else "XAU/USD"
 
-    sym_map = {"XAUUSD": "XAU/USD", "US100": "QQQ", "NAS100": "QQQ", "BTCUSDT": "BTC/USD", "XAGUSD": "XAG/USD"}
+    sym_map = {"XAUUSD": "XAU/USD", "US100": "QQQ", "NAS100": "QQQ", "BTCUSD": "BTC/USD", "XAGUSD": "XAG/USD"}
     symbol = sym_map.get(symbol, symbol)
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
 
-    cfg = SYMBOLS[symbol]
+    cfg = get_symbol_cfg(symbol)
+    if not cfg:
+        await update.message.reply_text("Konfig bulunamadi.")
+        return
     await update.message.reply_text(f"⏳ {symbol} icin backtest calisiyor... (100 mum)")
 
     try:
-        df = await aget_candles(symbol, "1min", 100)
+        df = await aget_candles(symbol, cfg["interval"], 100)
         df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
         if df is None or len(df) < 30:
             await update.message.reply_text("❌ Veri alinamadi.")
@@ -1717,7 +1884,6 @@ async def main():
     app.add_handler(CommandHandler("komutlar",   cmd_komutlar))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(CommandHandler("durum",      cmd_durum))
-    app.add_handler(CommandHandler("fiyat",      cmd_fiyat))
     app.add_handler(CommandHandler("analiz",     cmd_analiz))
     app.add_handler(CommandHandler("istatistik", cmd_istatistik))
     app.add_handler(CommandHandler("sinyal",     cmd_sinyal))
@@ -1737,6 +1903,8 @@ async def main():
     app.add_handler(CommandHandler("favori",     cmd_favori))
     app.add_handler(CommandHandler("alarm",      cmd_alarm))
     app.add_handler(CommandHandler("seans",      cmd_seans))
+    app.add_handler(CommandHandler("mod",        cmd_mod))
+    app.add_handler(CommandHandler("reset",      cmd_reset))
     app.add_handler(CommandHandler("equity",     cmd_equity))
     app.add_handler(CommandHandler("pnl",        cmd_pnl_dispatcher))
     app.add_handler(CommandHandler("backtest",   cmd_backtest))
@@ -1766,23 +1934,3 @@ async def run_all():
 
 if __name__ == "__main__":
     asyncio.run(run_all())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
