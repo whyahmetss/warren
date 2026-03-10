@@ -45,7 +45,7 @@ SYMBOLS = {
 
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5   # Min 1:2.5 - 1.1 RR uzun vadede kazandirmaz
-MIN_CONFLUENCE   = 3       # Minimum confluence (3+ = Kill Zone setup)
+MIN_CONFLUENCE   = 4       # Minimum confluence (3+ = Kill Zone setup)
 MAX_DAILY_TRADES = 9999  # Gunluk sinir kaldirildi
 RISK_PER_TRADE   = 0.01    # %1
 MAX_DAILY_RISK   = 0.03    # %3
