@@ -1382,7 +1382,7 @@ async def cmd_favori(update, ctx):
         favori_semboller = set(SYMBOLS.keys())
         await update.message.reply_text("Favori: Tum semboller")
 
-async def cmd_alarm(update, ctx):(update, ctx):
+async def cmd_alarm(update, ctx):
     """//alarm XAUUSD 2650 ust - Fiyat 2650'ye ulasinca uyari"""
     if not ctx.args or len(ctx.args) < 3:
         await update.message.reply_text("Kullanim: /alarm SEMBOL FIYAT ust|alt\nOrnek: /alarm XAUUSD 2650 ust")
@@ -1934,55 +1934,3 @@ async def run_all():
 
 if __name__ == "__main__":
     asyncio.run(run_all())
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
