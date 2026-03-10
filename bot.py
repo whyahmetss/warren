@@ -148,6 +148,11 @@ def _deepseek_chat(system_prompt: str, user_prompt: str, max_tokens: int = 2000)
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
 
 def get_economic_calendar_api():
+    """
+    FMP'den bugünün ekonomik takvimini çek.
+    Her olay için: saat(UTC), olay adı, etki, ülke, tahmin, önceki değer döner.
+    Sadece HIGH ve MEDIUM etkili USD olayları filtrelenir.
+    """
     if not FMP_API_KEY:
         return None
     now   = datetime.utcnow()
@@ -170,9 +175,19 @@ def get_economic_calendar_api():
             dt_str     = str(e.get("date") or e.get("datetime") or "").replace("T", " ")
             event_name = e.get("event") or e.get("title") or e.get("name") or ""
             impact     = (e.get("impact") or e.get("importance") or "Medium").upper()
-            if "HIGH"   in impact: etki = "🔴 YÜKSEK"
-            elif "MED"  in impact: etki = "🟡 ORTA"
-            else:                  etki = "🟢 DÜŞÜK"
+            country    = (e.get("country") or "").upper()
+
+            if "HIGH"  in impact: etki = "🔴"; etki_text = "Yüksek"
+            elif "MED" in impact: etki = "🟡"; etki_text = "Orta"
+            else:                 etki = "🟢"; etki_text = "Düşük"
+
+            # Sadece Yüksek ve Orta etkili USD olaylarını göster
+            if etki_text == "Düşük":
+                continue
+            if country and country not in ("US", "USD", ""):
+                continue
+
+            # Saat parse
             hour, minute = "12", "00"
             if " " in dt_str and ":" in dt_str:
                 tpart = dt_str.split()[1]
@@ -182,14 +197,88 @@ def get_economic_calendar_api():
                     minute = f"{int(parts[1]) if len(parts) > 1 else 0:02d}"
                 except (ValueError, IndexError):
                     pass
-            events.append({"saat": f"{hour}:{minute}", "olay": event_name,
-                           "etki": etki, "country": e.get("country", "")})
+
+            # TR saati (UTC+3)
+            try:
+                tr_hour = f"{int(hour)+3:02d}"
+            except:
+                tr_hour = hour
+
+            # Tahmin & Önceki değer
+            tahmin  = e.get("estimate") or e.get("forecast") or e.get("consensus")
+            onceki  = e.get("previous") or e.get("prev")
+
+            def fmt_val(v):
+                if v is None: return None
+                try:
+                    f = float(v)
+                    # Büyük sayılar K formatında (örn. 11500 → 11.5K)
+                    if abs(f) >= 1000:
+                        return f"{f/1000:.1f}K"
+                    elif abs(f) < 1:
+                        return f"{f*100:.1f}%"
+                    else:
+                        return f"{f:.1f}%"
+                except:
+                    return str(v)
+
+            events.append({
+                "saat":      f"{hour}:{minute}",
+                "tr_saat":   f"{tr_hour}:{minute}",
+                "olay":      event_name,
+                "etki":      etki,
+                "etki_text": etki_text,
+                "country":   country,
+                "tahmin":    fmt_val(tahmin),
+                "onceki":    fmt_val(onceki),
+            })
+
+        # Saate göre sırala
+        events.sort(key=lambda x: x["saat"])
         _takvim_api_cache["date"]   = today
         _takvim_api_cache["events"] = events
         return events
     except Exception as ex:
         log.warning(f"Takvim API hatasi: {ex}")
         return None
+
+
+def format_takvim_mesaji(events: list, baslik_tarih: str) -> str:
+    """
+    Resimde görülen formatta takvim mesajı üret:
+    📅 Önemli Haberler (🔴 Yüksek & 🟡 Orta Etki)
+    🗓 Toplam: X haber
+    ...
+    """
+    if not events:
+        return (
+            f"📅 Ekonomik Takvim ({baslik_tarih})\n\n"
+            "ℹ️ Bugün önemli USD haberi yok.\n\n"
+            "Detaylı: investing.com/economic-calendar"
+        )
+
+    lines = [
+        f"📅 Önemli Haberler (🔴 Yüksek & 🟡 Orta Etki)",
+        f"🗓 Toplam: {len(events)} haber",
+    ]
+
+    for e in events:
+        lines.append("")  # boş satır ayrım için
+        lines.append(f"{e['etki']} {e['olay']}")
+        lines.append(f"🌐 USD | 🕐 {e['tr_saat']}")
+
+        extras = []
+        if e.get("tahmin"):
+            extras.append(f"Tahmin: {e['tahmin']}")
+        if e.get("onceki"):
+            extras.append(f"Önceki: {e['onceki']}")
+        if extras:
+            lines.append("📊 " + " | ".join(extras))
+
+    lines.append("")
+    lines.append("⚠️ Yüksek etkili olaylardan 15dk önce işlem açma!")
+
+    return "\n".join(lines)
 
 
 # ── KEEP ALIVE (tek port: 10000) ─────────────────────────────
@@ -964,14 +1053,23 @@ async def cmd_dashboard(update, ctx):
     )
 
 async def cmd_takvim(update, ctx):
-    now_tr = datetime.utcnow() + timedelta(hours=3)
-    await update.message.reply_text(
-        f"📅 Ekonomik Takvim ({now_tr.strftime('%d.%m.%Y')})\n\n"
-        "⚠️ Yüksek etkili olaylardan 15dk önce işlem açma!\n\n"
-        "🔴 FOMC, NFP, CPI → yüksek volatilite\n"
-        "🟡 PMI, ISM → orta etki\n\n"
-        "Detaylı: investing.com/economic-calendar"
-    )
+    """Bugünün ekonomik takvimini resimde görülen formatta göster."""
+    now_tr  = datetime.utcnow() + timedelta(hours=3)
+    tarih   = now_tr.strftime("%d.%m.%Y")
+    events  = get_economic_calendar_api()
+
+    if events is None:
+        await update.message.reply_text(
+            f"📅 Ekonomik Takvim ({tarih})\n\n"
+            "⚠️ FMP_API_KEY tanımlı değil ya da veri alınamadı.\n\n"
+            "🔴 FOMC, NFP, CPI → yüksek volatilite\n"
+            "🟡 PMI, ISM → orta etki\n\n"
+            "Detaylı: investing.com/economic-calendar"
+        )
+        return
+
+    mesaj = format_takvim_mesaji(events, tarih)
+    await update.message.reply_text(mesaj)
 
 async def cmd_favori(update, ctx):
     global favori_semboller
@@ -1370,34 +1468,66 @@ async def send_weekly_summary(app):
 # ── EKONOMİK TAKVİM KONTROLÜ ─────────────────────────────────
 
 async def check_economic_calendar(app):
+    """
+    Her döngüde 30dk sonraki yüksek/orta etkili USD haberlerini kontrol et.
+    Sabah 09:00 TR'de (06:00 UTC) aynı zamanda günün tüm takvimini özetle gönder.
+    """
     global gonderilen_takvim_uyarilari
     now_utc = datetime.utcnow()
     if now_utc.weekday() >= 5: return
+
     bugun = str(now_utc.date())
     gonderilen_takvim_uyarilari = {k for k in gonderilen_takvim_uyarilari if k.endswith(bugun)}
+
     olaylar = get_economic_calendar_api()
     if olaylar is None:
+        # FMP yoksa statik fallback (yalnızca 30dk uyarısı için)
         olaylar = [o for o in EKONOMIK_OLAYLAR if o.get("gun",-1) == -1 or o.get("gun") == now_utc.weekday()]
+
+    # ── Sabah özeti: 06:00 UTC (09:00 TR) - bir kez gönder
+    sabah_key = f"sabah_ozet_{bugun}"
+    if now_utc.hour == 6 and now_utc.minute < 5 and sabah_key not in gonderilen_takvim_uyarilari:
+        gonderilen_takvim_uyarilari.add(sabah_key)
+        now_tr = now_utc + timedelta(hours=3)
+        tarih  = now_tr.strftime("%d.%m.%Y")
+        mesaj  = format_takvim_mesaji(olaylar, tarih)
+        try:
+            await app.bot.send_message(chat_id=TG_CHAT_ID, text=mesaj)
+            log.info("Sabah takvim ozeti gonderildi.")
+        except Exception as e:
+            log.error(f"Sabah takvim ozeti hatasi: {e}")
+
+    # ── 30 dakika öncesi bireysel uyarılar
     for olay in olaylar:
         try:
-            olay_saati = datetime.strptime(olay["saat"],"%H:%M").replace(
+            olay_saati = datetime.strptime(olay["saat"], "%H:%M").replace(
                 year=now_utc.year, month=now_utc.month, day=now_utc.day)
-        except (ValueError,TypeError): continue
+        except (ValueError, TypeError):
+            continue
         fark = (olay_saati - now_utc).total_seconds() / 60
         if 25 <= fark <= 35:
-            anahtar = f"{olay['olay']}_{now_utc.date()}"
+            anahtar = f"{olay['olay']}_{bugun}"
             if anahtar in gonderilen_takvim_uyarilari: continue
             gonderilen_takvim_uyarilari.add(anahtar)
-            tr_saat = f"{int(olay['saat'][:2])+3:02d}:{olay['saat'][3:]}"
+
+            tr_saat = olay.get("tr_saat") or f"{int(olay['saat'][:2])+3:02d}:{olay['saat'][3:]}"
+            etki    = olay.get("etki", "⚠️")
+
+            # Tahmin / önceki değer satırı
+            extras = []
+            if olay.get("tahmin"): extras.append(f"Tahmin: {olay['tahmin']}")
+            if olay.get("onceki"): extras.append(f"Önceki: {olay['onceki']}")
+            extra_line = ("\n📊 " + " | ".join(extras)) if extras else ""
+
             try:
                 await app.bot.send_message(
                     chat_id=TG_CHAT_ID,
                     text=(
-                        f"⚠️ EKONOMİK TAKVİM UYARISI\n\n"
-                        f"{olay['etki']} - 30 dakika sonra!\n"
-                        f"📌 {olay['olay']}\n"
-                        f"🕐 {olay['saat']} UTC ({tr_saat} TR)\n\n"
-                        f"⚡ Yüksek volatilite bekleniyor!"
+                        f"⚠️ EKONOMİK TAKVİM - 30 DAKİKA KALDI!\n\n"
+                        f"{etki} {olay['olay']}\n"
+                        f"🌐 USD | 🕐 {tr_saat} TR"
+                        f"{extra_line}\n\n"
+                        f"⚡ Açık pozisyonlarını kontrol et!"
                     )
                 )
             except Exception as e:
