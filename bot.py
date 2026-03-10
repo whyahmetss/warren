@@ -50,18 +50,15 @@ DEEPSEEK_MODEL = "deepseek-chat"   # DeepSeek-V3
 SYMBOLS = {
     "XAU/USD": {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "QQQ":     {"name": "QQQ",     "interval": "1min", "htf": "15min", "pip_val": 10},
-    "XAG/USD": {"name": "XAGUSD",  "interval": "1min", "htf": "15min", "pip_val": 50},
     "BTC/USD": {"name": "BTCUSD",  "interval": "1min", "htf": "15min", "pip_val": 1},
 }
 
 # ── SEMBOL HARİTASI (panel butonları için) ───────────────────
 # Buton callback'den gelen string → SYMBOLS key
 SYMBOL_MAP = {
-    "XAUUSD":  "XAU/USD",
-    "QQQ":     "QQQ",
-    "XAGUSD":  "XAG/USD",   # Panel'de Gümüş
-    "BTCUSD":  "BTC/USD",   # DÜZELTME: eskiden BTCUSDT yazıyordu, eşleşmiyordu
-    "EURUSD":  "XAU/USD",   # Panel'deki EURUSD butonu aslında yoktu, altına yönlendir
+    "XAUUSD": "XAU/USD",
+    "QQQ":    "QQQ",
+    "BTCUSD": "BTC/USD",
 }
 
 COOLDOWN_MIN     = 30
@@ -147,18 +144,132 @@ def _deepseek_chat(system_prompt: str, user_prompt: str, max_tokens: int = 2000)
 
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
 
+def _fmt_val(v):
+    """Sayısal değeri okunabilir stringe çevir: 11500 → 11.5K, 0.003 → 0.3%"""
+    if v is None:
+        return None
+    try:
+        f = float(str(v).replace("%","").replace("K","000").strip())
+        if abs(f) >= 1000:
+            return f"{f/1000:.1f}K"
+        elif abs(f) < 1 and f != 0:
+            return f"{f*100:.2f}%"
+        else:
+            return f"{f:.2f}%"
+    except:
+        s = str(v).strip()
+        return s if s else None
+
+
 def get_economic_calendar_api():
     """
-    FMP'den bugünün ekonomik takvimini çek.
-    Her olay için: saat(UTC), olay adı, etki, ülke, tahmin, önceki değer döner.
-    Sadece HIGH ve MEDIUM etkili USD olayları filtrelenir.
+    ForexFactory JSON feed - API key gerektirmez, tamamen ucretsiz.
+    Haftanin tum olaylarini cekar, bugunü filtreler.
+    Fallback: FMP API (eger key varsa).
     """
-    if not FMP_API_KEY:
-        return None
     now   = datetime.utcnow()
     today = now.strftime("%Y-%m-%d")
+
+    # Cache kontrolu (1 saat gecerli)
     if _takvim_api_cache["date"] == today and _takvim_api_cache["events"]:
         return _takvim_api_cache["events"]
+
+    events = _fetch_forexfactory(today)
+
+    # ForexFactory basarisizsa FMP dene
+    if events is None and FMP_API_KEY:
+        events = _fetch_fmp(today)
+
+    if events is None:
+        events = []
+
+    _takvim_api_cache["date"]   = today
+    _takvim_api_cache["events"] = events
+    return events
+
+
+def _fetch_forexfactory(today: str):
+    """
+    ForexFactory haftalik JSON: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+    Format: [{title, country, date, impact, forecast, previous}, ...]
+    """
+    try:
+        r = requests.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            log.warning(f"ForexFactory HTTP {r.status_code}")
+            return None
+        data = r.json()
+        if not isinstance(data, list):
+            return None
+
+        events = []
+        for e in data:
+            # Tarih filtresi: sadece bugun
+            raw_date = str(e.get("date") or "")
+            if today not in raw_date:
+                continue
+
+            country = (e.get("country") or "").upper()
+            if country != "USD":
+                continue
+
+            impact = (e.get("impact") or "Low").strip()
+            if impact == "High":
+                etki = "🔴"; etki_text = "Yuksek"
+            elif impact == "Medium":
+                etki = "🟡"; etki_text = "Orta"
+            else:
+                continue  # Low etkileri gosterme
+
+            event_name = e.get("title") or e.get("name") or ""
+
+            # Saat parse: "2025-03-10T13:30:00-0500" formatinda gelebilir
+            dt_raw = str(e.get("date") or "").replace("T", " ")
+            hour, minute = "12", "00"
+            if " " in dt_raw:
+                tpart = dt_raw.split(" ")[1][:5]
+                try:
+                    parts  = tpart.split(":")
+                    # ForexFactory EST (UTC-5), biz UTC istiyoruz: +5
+                    h_est  = int(parts[0])
+                    m_val  = int(parts[1]) if len(parts) > 1 else 0
+                    h_utc  = (h_est + 5) % 24   # EST → UTC
+                    hour   = f"{h_utc:02d}"
+                    minute = f"{m_val:02d}"
+                except (ValueError, IndexError):
+                    pass
+
+            try:
+                tr_hour = f"{(int(hour)+3) % 24:02d}"
+            except:
+                tr_hour = hour
+
+            events.append({
+                "saat":      f"{hour}:{minute}",
+                "tr_saat":   f"{tr_hour}:{minute}",
+                "olay":      event_name,
+                "etki":      etki,
+                "etki_text": etki_text,
+                "country":   country,
+                "tahmin":    _fmt_val(e.get("forecast")),
+                "onceki":    _fmt_val(e.get("previous")),
+            })
+
+        events.sort(key=lambda x: x["saat"])
+        log.info(f"ForexFactory: {len(events)} olay bulundu ({today})")
+        return events
+
+    except Exception as ex:
+        log.warning(f"ForexFactory hatasi: {ex}")
+        return None
+
+
+def _fetch_fmp(today: str):
+    """FMP API yedek kaynagi (key gerekli)."""
     try:
         r = requests.get(
             "https://financialmodelingprep.com/stable/economic-calendar",
@@ -170,57 +281,31 @@ def get_economic_calendar_api():
             return None
         if not isinstance(data, list):
             return None
+
         events = []
         for e in data:
             dt_str     = str(e.get("date") or e.get("datetime") or "").replace("T", " ")
-            event_name = e.get("event") or e.get("title") or e.get("name") or ""
-            impact     = (e.get("impact") or e.get("importance") or "Medium").upper()
+            event_name = e.get("event") or e.get("title") or ""
+            impact     = (e.get("impact") or "Medium").upper()
             country    = (e.get("country") or "").upper()
 
-            if "HIGH"  in impact: etki = "🔴"; etki_text = "Yüksek"
+            if "HIGH"  in impact: etki = "🔴"; etki_text = "Yuksek"
             elif "MED" in impact: etki = "🟡"; etki_text = "Orta"
-            else:                 etki = "🟢"; etki_text = "Düşük"
+            else: continue
+            if country not in ("US", "USD", ""): continue
 
-            # Sadece Yüksek ve Orta etkili USD olaylarını göster
-            if etki_text == "Düşük":
-                continue
-            if country and country not in ("US", "USD", ""):
-                continue
-
-            # Saat parse
             hour, minute = "12", "00"
             if " " in dt_str and ":" in dt_str:
                 tpart = dt_str.split()[1]
                 parts = tpart.split(":")
                 try:
                     hour   = f"{int(parts[0]):02d}"
-                    minute = f"{int(parts[1]) if len(parts) > 1 else 0:02d}"
-                except (ValueError, IndexError):
-                    pass
-
-            # TR saati (UTC+3)
+                    minute = f"{int(parts[1]) if len(parts)>1 else 0:02d}"
+                except: pass
             try:
-                tr_hour = f"{int(hour)+3:02d}"
+                tr_hour = f"{(int(hour)+3)%24:02d}"
             except:
                 tr_hour = hour
-
-            # Tahmin & Önceki değer
-            tahmin  = e.get("estimate") or e.get("forecast") or e.get("consensus")
-            onceki  = e.get("previous") or e.get("prev")
-
-            def fmt_val(v):
-                if v is None: return None
-                try:
-                    f = float(v)
-                    # Büyük sayılar K formatında (örn. 11500 → 11.5K)
-                    if abs(f) >= 1000:
-                        return f"{f/1000:.1f}K"
-                    elif abs(f) < 1:
-                        return f"{f*100:.1f}%"
-                    else:
-                        return f"{f:.1f}%"
-                except:
-                    return str(v)
 
             events.append({
                 "saat":      f"{hour}:{minute}",
@@ -229,17 +314,14 @@ def get_economic_calendar_api():
                 "etki":      etki,
                 "etki_text": etki_text,
                 "country":   country,
-                "tahmin":    fmt_val(tahmin),
-                "onceki":    fmt_val(onceki),
+                "tahmin":    _fmt_val(e.get("estimate") or e.get("forecast")),
+                "onceki":    _fmt_val(e.get("previous")),
             })
 
-        # Saate göre sırala
         events.sort(key=lambda x: x["saat"])
-        _takvim_api_cache["date"]   = today
-        _takvim_api_cache["events"] = events
         return events
     except Exception as ex:
-        log.warning(f"Takvim API hatasi: {ex}")
+        log.warning(f"FMP hatasi: {ex}")
         return None
 
 
@@ -676,17 +758,23 @@ def _panel_main_kbd():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Durum",    callback_data="panel_durum"),
          InlineKeyboardButton("🖥 Analiz",   callback_data="panel_analiz")],
-        [InlineKeyboardButton("💰 Fiyat",    callback_data="cmd_fiyat"),
-         InlineKeyboardButton("🔍 Sinyal",   callback_data="cmd_sinyal")],
-        [InlineKeyboardButton("📊 Dashboard",callback_data="cmd_dashboard"),
-         InlineKeyboardButton("📰 Haberler", callback_data="cmd_haber")],
-        [InlineKeyboardButton("📈 Equity",   callback_data="cmd_equity"),
-         InlineKeyboardButton("📉 İstatistik",callback_data="cmd_istatistik")],
-        [InlineKeyboardButton("📋 HTF Analiz",callback_data="cmd_htfanaliz"),
-         InlineKeyboardButton("▶ Aç",        callback_data="cmd_ac"),
-         InlineKeyboardButton("⏹ Kapat",     callback_data="cmd_kapat"),
-         InlineKeyboardButton("🔄 Reset",     callback_data="cmd_reset")],
+        [InlineKeyboardButton("🔍 Sinyal",    callback_data="cmd_sinyal"),
+         InlineKeyboardButton("📊 Dashboard", callback_data="cmd_dashboard")],
+        [InlineKeyboardButton("📰 Haberler",  callback_data="panel_haber"),
+         InlineKeyboardButton("📈 Equity",    callback_data="cmd_equity")],
+        [InlineKeyboardButton("📉 İstatistik", callback_data="cmd_istatistik"),
+         InlineKeyboardButton("📋 HTF Analiz", callback_data="cmd_htfanaliz")],
+        [InlineKeyboardButton("▶ Aç",   callback_data="cmd_ac"),
+         InlineKeyboardButton("⏹ Kapat", callback_data="cmd_kapat"),
+         InlineKeyboardButton("🔄 Reset", callback_data="cmd_reset")],
         [InlineKeyboardButton("👥 Grup",      callback_data="panel_grup")],
+    ])
+
+def _panel_haber_kbd():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Ekonomik Takvim", callback_data="cmd_takvim_panel")],
+        [InlineKeyboardButton("🧠 AI Piyasa Analizi", callback_data="cmd_haber")],
+        [InlineKeyboardButton("◀ Geri", callback_data="panel")],
     ])
 
 def _panel_durum_kbd():
@@ -698,13 +786,11 @@ def _panel_durum_kbd():
     ])
 
 def _panel_analiz_kbd():
-    # DÜZELTME: BTC butonu artık BTCUSD gönderiyor (eskiden BTCUSDT - SYMBOLS'da yoktu)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🥇 ALTIN",  callback_data="cmd_analiz_XAUUSD"),
-         InlineKeyboardButton("📊 NASDAQ", callback_data="cmd_analiz_QQQ")],
-        [InlineKeyboardButton("🪙 GÜMÜŞ",  callback_data="cmd_analiz_XAGUSD"),
-         InlineKeyboardButton("₿ BİTCOİN", callback_data="cmd_analiz_BTCUSD")],
-        [InlineKeyboardButton("◀ Geri",   callback_data="panel")],
+        [InlineKeyboardButton("🥇 ALTIN",   callback_data="cmd_analiz_XAUUSD"),
+         InlineKeyboardButton("📊 NASDAQ",  callback_data="cmd_analiz_QQQ")],
+        [InlineKeyboardButton("₿ BİTCOİN", callback_data="cmd_analiz_BTCUSD")],
+        [InlineKeyboardButton("◀ Geri",    callback_data="panel")],
     ])
 
 def _panel_grup_kbd():
@@ -763,6 +849,8 @@ async def handle_button(update, ctx):
         await edit_panel("Warren Panel › Analiz", _panel_analiz_kbd()); return
     if data == "panel_grup":
         await edit_panel("Warren Panel › Grup", _panel_grup_kbd()); return
+    if data == "panel_haber":
+        await edit_panel("Warren Panel › Haberler", _panel_haber_kbd()); return
 
     if not data or not data.startswith("cmd_"):
         return
@@ -796,18 +884,46 @@ async def handle_button(update, ctx):
 
     # ── Analiz panel butonları
     elif cmd.startswith("analiz_"):
-        sym_key = cmd[7:]  # örn. XAUUSD
+        sym_key = cmd[7:]
         symbol  = SYMBOL_MAP.get(sym_key)
         if not symbol or symbol not in SYMBOLS:
             await reply(f"Bilinmeyen sembol: {sym_key}"); return
-        cfg = SYMBOLS[symbol]
-        await reply(f"{symbol} analiz ediliyor...")
-        df_ltf = get_candles(symbol, cfg["interval"], 50)
-        df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
-        if df_ltf is None:
-            await reply("Veri alınamadı."); return
-        sig = analyze_ict(df_ltf, df_htf)
-        await reply(format_signal(symbol, sig) if sig else f"{symbol}: Setup yok, bekleniyor...")
+
+        name = SYMBOLS[symbol]["name"]
+
+        # Aktif (beklenen) sinyal
+        aktif = aktif_sinyaller.get(symbol)
+        if aktif:
+            prec = 2 if "XAU" in symbol else 1
+            p    = lambda v: f"{v:.{prec}f}"
+            sure = int((datetime.utcnow() - aktif["time"]).total_seconds() / 60)
+            aktif_txt = (
+                f"BEKLEYEN\n"
+                f"{aktif['direction']} @ {p(aktif['entry'])}\n"
+                f"SL: {p(aktif['sl'])} | TP: {p(aktif['tp'])}\n"
+                f"Süredir bekliyor: {sure} dk"
+            )
+        else:
+            aktif_txt = "Aktif sinyal yok"
+
+        # Sembol istatistikleri (kapalı işlemler)
+        s = stats_per_symbol.get(symbol, {"total": 0, "win": 0, "loss": 0})
+        total = s["total"]
+        wins  = s["win"]
+        losses= s["loss"]
+        wr    = (wins / total * 100) if total > 0 else 0
+        acik  = 1 if aktif else 0
+
+        istat_txt = (
+            f"Kapalı: {total} işlem\n"
+            f"  TP: {wins}  SL: {losses}  WR: %{wr:.0f}"
+        ) if total > 0 else "Henüz kapalı işlem yok"
+
+        await reply(
+            f"=== {name} ===\n\n"
+            f"[AÇIK]\n{aktif_txt}\n\n"
+            f"[KAPALI]\n{istat_txt}"
+        )
 
     # ── Fiyat
     elif cmd == "fiyat":
@@ -918,6 +1034,20 @@ async def handle_button(update, ctx):
             await ctx.bot.send_photo(chat_id=target.chat_id, photo=buf)
         except Exception as e:
             await reply(f"Grafik hatası: {e}")
+
+    # ── Ekonomik Takvim (panel butonu)
+    elif cmd == "takvim_panel":
+        now_tr  = datetime.utcnow() + timedelta(hours=3)
+        tarih   = now_tr.strftime("%d.%m.%Y")
+        events  = get_economic_calendar_api()
+        if events is None or len(events) == 0:
+            await reply(
+                f"📅 Ekonomik Takvim ({tarih})\n\n"
+                "ℹ️ Bugun onemli USD haberi yok ya da veri alinamadi.\n"
+                "Detayli: investing.com/economic-calendar"
+            )
+        else:
+            await reply(format_takvim_mesaji(events, tarih))
 
     # ── Haberler (DeepSeek)
     elif cmd == "haber":
