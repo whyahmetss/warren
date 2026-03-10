@@ -22,6 +22,7 @@ TG_TOKEN   = ...
 TG_CHAT_ID = ...
 TD_API_KEY = [Twelve Data'dan al]
 FMP_API_KEY = [financialmodelingprep.com - ucretsiz, ekonomik takvim icin]
+ICT_REQUIRE_CORE = 0 [1 yaparsan Sweep + MSS zorunlu calisir]
 
 ## 5. Deploy!
 "Create Web Service" → 2-3 dk bekle → bot calisiyor!

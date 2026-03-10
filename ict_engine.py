@@ -352,10 +352,12 @@ def check_market_conditions(h, l, c, o, lookback=20):
 
 # ── ANA ANALİZ ───────────────────────────────────────────────
 
-def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
+def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_core=False):
     """
-    ZORUNLU (bunlar olmadan sinyal yok):
+    ZORUNLU:
       1. Kill Zone aktif
+
+    Opsiyonel katı filtre (require_core=True):
       2. Liquidity Sweep
       3. MSS (sweep sonrasi yapısal kirilma)
 
@@ -382,14 +384,11 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
 
     htf_bias = detect_htf_bias(df_htf)
 
-    # ZORUNLU: Sweep
     sweep = detect_liquidity_sweep(h, l, c, o, atr=atr)
-    if not sweep["bull_sweep"] and not sweep["bear_sweep"]:
-        return None
-
-    # ZORUNLU: MSS
     mss = detect_mss(h, l, c, o, sweep)
-    if not mss["bull_mss"] and not mss["bear_mss"]:
+    if require_core and not sweep["bull_sweep"] and not sweep["bear_sweep"]:
+        return None
+    if require_core and not mss["bull_mss"] and not mss["bear_mss"]:
         return None
 
     fvg = detect_fvg(h, l, c, o, atr=atr)
@@ -423,11 +422,11 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4):
     checks    = {}
     conf      = 0
 
-    if (mss["bull_mss"] and bull_conf >= min_confluence
+    if (bull_conf >= min_confluence
             and bull_conf >= bear_conf and htf_bias >= 0):
         direction = "LONG";  checks = bull_checks; conf = bull_conf
 
-    elif (mss["bear_mss"] and bear_conf >= min_confluence
+    elif (bear_conf >= min_confluence
             and bear_conf > bull_conf and htf_bias <= 0):
         direction = "SHORT"; checks = bear_checks; conf = bear_conf
 
