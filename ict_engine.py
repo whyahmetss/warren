@@ -352,7 +352,7 @@ def check_market_conditions(h, l, c, o, lookback=20):
 
 # ── ANA ANALİZ ───────────────────────────────────────────────
 
-def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_core=False):
+def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_core=False, debug=False):
     """
     ZORUNLU:
       1. Kill Zone aktif
@@ -363,9 +363,16 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
 
     CONFLUENCE skorlama (min 4/6):
       Sweep / MSS / FVG / OB / OTE / HTF Bias
+
+    debug=True ise (signal, reason) döner.
     """
+    def _ret(signal, reason):
+        if debug:
+            return signal, reason
+        return signal
+
     if df_ltf is None or len(df_ltf) < 35:
-        return None
+        return _ret(None, "ltf_data_short")
 
     h = df_ltf["h"].values.astype(float)
     l = df_ltf["l"].values.astype(float)
@@ -375,11 +382,12 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
 
     session = get_active_session()
     if session is None:
-        return None
+        return _ret(None, "outside_killzone")
 
     mkt = check_market_conditions(h, l, c, o)
     if not mkt["ok"]:
-        return None
+        reason = mkt.get("reason", "market_filter") or "market_filter"
+        return _ret(None, f"market_{reason.replace('/', '_').replace(' ', '_')}")
     atr = mkt["atr"]
 
     htf_bias = detect_htf_bias(df_htf)
@@ -387,9 +395,9 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
     sweep = detect_liquidity_sweep(h, l, c, o, atr=atr)
     mss = detect_mss(h, l, c, o, sweep)
     if require_core and not sweep["bull_sweep"] and not sweep["bear_sweep"]:
-        return None
+        return _ret(None, "core_sweep_missing")
     if require_core and not mss["bull_mss"] and not mss["bear_mss"]:
-        return None
+        return _ret(None, "core_mss_missing")
 
     fvg = detect_fvg(h, l, c, o, atr=atr)
     ob  = detect_order_block(h, l, c, o, atr=atr)
@@ -431,7 +439,11 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
         direction = "SHORT"; checks = bear_checks; conf = bear_conf
 
     if direction is None:
-        return None
+        if bull_conf < min_confluence and bear_conf < min_confluence:
+            return _ret(None, "low_confluence")
+        if htf_bias == 0:
+            return _ret(None, "neutral_htf_bias")
+        return _ret(None, "direction_not_selected")
 
     # SL/TP — sweep seviyesi bazli
     sl_buffer = atr * 0.5
@@ -445,8 +457,10 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
     sl_dist = abs(price - sl)
     tp_dist = abs(tp - price)
 
-    if sl_dist == 0 or (tp_dist / sl_dist) < min_rr:
-        return None
+    if sl_dist == 0:
+        return _ret(None, "sl_distance_zero")
+    if (tp_dist / sl_dist) < min_rr:
+        return _ret(None, "rr_below_threshold")
 
     rr = tp_dist / sl_dist
 
@@ -455,7 +469,7 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
     elif conf == 4: strength = "MEDIUM"
     else:           strength = "LOW"
 
-    return {
+    return _ret({
         "direction":   direction,
         "price":       price,
         "sl":          float(sl),
@@ -474,4 +488,4 @@ def analyze_ict_v2(df_ltf, df_htf=None, min_rr=2.5, min_confluence=4, require_co
         "sweep_level": sweep["sweep_level"],
         "ob_age":      ob["ob_age"],
         "fvg_age":     fvg["fvg_age"],
-    }
+    }, "ok")
