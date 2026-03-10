@@ -856,7 +856,7 @@ async def handle_button(update, ctx):
         )
     elif cmd == "durum_sinyal":
         wr = stats["win"] / stats["total"] * 100 if stats["total"] else 0
-        lines = [f"Toplam: {stats[\"total\"]}  Kazan: {stats[\"win\"]}  Kaybet: {stats[\"loss\"]}\\nWR: %{wr:.1f}", "\\n*Sembol bazli:*"]
+        lines = [f"Toplam: {stats['total']}  Kazan: {stats['win']}  Kaybet: {stats['loss']}\nWR: %{wr:.1f}", "\n*Sembol bazli:*"]
         for sym, s in stats_per_symbol.items():
             if s["total"] > 0:
                 swr = s["win"] / s["total"] * 100
