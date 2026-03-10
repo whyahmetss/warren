@@ -807,7 +807,7 @@ def _panel_analiz_kbd():
         [InlineKeyboardButton("🥇 ALTIN",   callback_data="cmd_analiz_XAUUSD"),
          InlineKeyboardButton("📊 NASDAQ",  callback_data="cmd_analiz_QQQ")],
         [InlineKeyboardButton("₿ BİTCOİN", callback_data="cmd_analiz_BTCUSD")],
-      [InlineKeyboardButton("🦾 GÜMÜŞ",   callback_data="cmd_analiz_XAGUSD"),
+      [InlineKeyboardButton("🦾 GÜMÜŞ",   callback_data="cmd_analiz_XAGUSD")],
         [InlineKeyboardButton("◀ Geri",    callback_data="panel")],
     ])
 
