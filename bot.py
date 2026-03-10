@@ -16,8 +16,10 @@ DUZELTMELER (v4.1):
 
 import os
 import io
+import json
 import logging
 import asyncio
+import sqlite3
 import threading
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -43,6 +45,57 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")   # platform.deepseek.
 FMP_API_KEY    = os.environ.get("FMP_API_KEY",    "")
 ADMIN_IDS      = [6663913960]
 
+# ── PERSIST DB ───────────────────────────────────────────────
+DB_PATH = os.environ.get("DB_PATH", "/tmp/warren_state.db")
+
+def _db_connect():
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS state (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    con.commit()
+    return con
+
+_db_con = _db_connect()
+
+def persist_save():
+    """Kritik state'i SQLite'a yaz."""
+    payload = json.dumps({
+        "stats":          stats,
+        "stats_per_symbol": stats_per_symbol,
+        "results_history":  results_history[-50:],
+        "aktif_sinyaller":  {
+            k: {**v, "time": v["time"].isoformat()}
+            for k, v in aktif_sinyaller.items()
+        },
+        "pnl_db": pnl_db,
+    })
+    _db_con.execute("INSERT OR REPLACE INTO state VALUES ('warren', ?)", (payload,))
+    _db_con.commit()
+
+def persist_load():
+    """Başlangıçta SQLite'tan state'i geri yükle."""
+    global stats, stats_per_symbol, results_history, aktif_sinyaller, pnl_db
+    try:
+        row = _db_con.execute("SELECT value FROM state WHERE key='warren'").fetchone()
+        if not row:
+            return
+        d = json.loads(row[0])
+        stats.update(d.get("stats", {}))
+        stats_per_symbol.update(d.get("stats_per_symbol", {}))
+        results_history[:] = d.get("results_history", [])
+        pnl_db.update(d.get("pnl_db", {}))
+        for sym, v in d.get("aktif_sinyaller", {}).items():
+            v["time"] = datetime.fromisoformat(v["time"])
+            aktif_sinyaller[sym] = v
+        log.info(f"State yüklendi: {stats['total']} işlem, {len(aktif_sinyaller)} aktif sinyal")
+    except Exception as e:
+        log.warning(f"State yüklenemedi (ilk çalıştırma?): {e}")
+
+# ── PERSIST DB ───────────────────────────────────────────────
 # DeepSeek API endpoint (OpenAI-uyumlu)
 DEEPSEEK_BASE  = "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = "deepseek-chat"   # DeepSeek-V3
@@ -50,7 +103,7 @@ DEEPSEEK_MODEL = "deepseek-chat"   # DeepSeek-V3
 SYMBOLS = {
     "XAU/USD": {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
     "QQQ":     {"name": "QQQ",     "interval": "1min", "htf": "15min", "pip_val": 10},
-    "BTC/USD": {"name": "BTCUSD",  "interval": "1min", "htf": "15min", "pip_val": 1},
+    "BTC/USD": {"name": "BTCUSD",  "interval": "5min", "htf": "1h",   "pip_val": 1},
 }
 
 # ── SEMBOL HARİTASI (panel butonları için) ───────────────────
@@ -64,21 +117,16 @@ SYMBOL_MAP = {
 COOLDOWN_MIN     = 30
 MIN_RR           = 2.5
 MIN_CONFLUENCE   = 4
-MAX_DAILY_TRADES = 9999
 RISK_PER_TRADE   = 0.01
 MAX_DAILY_RISK   = 0.03
 OB_LOOKBACK      = 20
 SIGNAL_INTERVAL  = 60
 
-daily_trade_count = 0
-daily_trade_date  = None
 stats             = {"total": 0, "win": 0, "loss": 0}
 stats_per_symbol  = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}
 results_history   = []
 kill_zone_only    = False
-favori_semboller  = set(SYMBOLS.keys())
 fiyat_alarmlari   = []
-signal_tracking   = {}
 last_daily_summary  = None
 last_weekly_summary = None
 warnings_db       = {}
@@ -93,13 +141,7 @@ son_kz_durum      = None
 _takvim_api_cache = {"date": None, "events": []}
 _htf_cache        = {}
 
-EKONOMIK_OLAYLAR = [
-    {"saat": "13:30", "olay": "NFP (Non-Farm Payrolls)", "gun": 5, "etki": "🔴 YÜKSEK"},
-    {"saat": "19:00", "olay": "FOMC Faiz Kararı",        "gun": -1, "etki": "🔴 YÜKSEK"},
-    {"saat": "13:30", "olay": "CPI Enflasyon Verisi",    "gun": -1, "etki": "🔴 YÜKSEK"},
-    {"saat": "14:45", "olay": "PMI Verisi",               "gun": -1, "etki": "🟡 ORTA"},
-    {"saat": "15:00", "olay": "ISM Verisi",               "gun": -1, "etki": "🟡 ORTA"},
-]
+
 
 # ── DeepSeek AI YARDIMCI ─────────────────────────────────────
 
@@ -411,22 +453,7 @@ def get_price(symbol):
     except:
         return None
 
-def get_daily_candles(symbol, outputsize=30):
-    try:
-        r = requests.get("https://api.twelvedata.com/time_series", params={
-            "symbol": symbol, "interval": "1day",
-            "outputsize": outputsize, "apikey": TD_API_KEY,
-        }, timeout=10)
-        data = r.json()
-        if "values" not in data:
-            return None
-        df = pd.DataFrame(data["values"])
-        df = df.rename(columns={"datetime": "time", "open": "o",
-                                 "high": "h", "low": "l", "close": "c"})
-        df = df.astype({"o": float, "h": float, "l": float, "c": float})
-        return df.iloc[::-1].reset_index(drop=True)
-    except:
-        return None
+
 
 def get_htf_cached(symbol, interval="15min", outputsize=30):
     global _htf_cache
@@ -448,7 +475,7 @@ def get_market_context():
     context = {}
     for symbol in ["XAU/USD", "QQQ"]:
         price = get_price(symbol)
-        daily = get_daily_candles(symbol, 10)
+        daily = get_candles(symbol, "1day", 10)
         if price and daily is not None:
             son5   = daily.tail(5)
             closes = son5["c"].values
@@ -608,7 +635,7 @@ def format_signal(symbol, sig):
     session   = sig.get("session", get_session())
     rr        = sig["rr"]
 
-    prec = 2 if "XAU" in symbol or "XAG" in symbol else (1 if "BTC" in symbol or "QQQ" in symbol else 5)
+    prec = 2 if "XAU" in symbol else (1 if "BTC" in symbol or "QQQ" in symbol else 5)
     p    = lambda v: f"{v:.{prec}f}"
 
     str_label = {"HIGH": "YUKSEK", "MEDIUM": "ORTA"}.get(strength, "DUSUK")
@@ -659,7 +686,6 @@ def _sinyal_butonlari(signal_id):
 
 async def scan_loop(app):
     global last_daily_analiz, last_daily_summary, last_weekly_summary
-    global daily_trade_count, daily_trade_date
     log.info("Ana dongu basladi")
 
     while True:
@@ -710,17 +736,7 @@ async def scan_loop(app):
         if not is_market_open() or not bot_active or not is_kill_zone():
             continue
 
-        today = datetime.utcnow().date()
-        if daily_trade_date != today:
-            daily_trade_count = 0
-            daily_trade_date  = today
-
-        if daily_trade_count >= MAX_DAILY_TRADES:
-            continue
-
         for symbol, cfg in SYMBOLS.items():
-            if symbol not in favori_semboller or daily_trade_count >= MAX_DAILY_TRADES:
-                continue
             try:
                 last = last_signal_time.get(symbol)
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
@@ -735,7 +751,6 @@ async def scan_loop(app):
                     if len(results_history) >= 3 and results_history[-3:] == ["L", "L", "L"]:
                         txt = f"⚠️ Ardışık 3 kayıp! Daha seçici ol.\n\n{txt}"
                     sig_id = f"{symbol.replace('/', '_')}_{int(datetime.utcnow().timestamp())}"
-                    signal_tracking[sig_id] = {"symbol": symbol, "sig": sig, "time": datetime.utcnow()}
                     await app.bot.send_message(
                         chat_id=TG_CHAT_ID, text=txt,
                         reply_markup=_sinyal_butonlari(sig_id),
@@ -746,7 +761,7 @@ async def scan_loop(app):
                         "sl": sig["sl"], "tp": sig["tp"], "time": datetime.utcnow(),
                     }
                     stats["total"] += 1
-                    daily_trade_count += 1
+                    persist_save()
                     log.info(f"Sinyal: {symbol} {sig['direction']} conf={sig['conf']}/6 RR=1:{sig['rr']:.1f}")
             except Exception as e:
                 log.error(f"Scan hatasi {symbol}: {e}")
@@ -818,7 +833,7 @@ async def cmd_komutlar(update, ctx):
     await cmd_start(update, ctx)
 
 async def handle_button(update, ctx):
-    global bot_active, daily_trade_count, daily_trade_date, last_signal_time
+    global bot_active, last_signal_time
     q    = update.callback_query
     await q.answer()
     data = q.data
@@ -982,9 +997,9 @@ async def handle_button(update, ctx):
         for s in stats_per_symbol:
             stats_per_symbol[s] = {"total": 0, "win": 0, "loss": 0}
         results_history.clear()
-        daily_trade_count = 0
-        daily_trade_date  = None
         last_signal_time.clear()
+        aktif_sinyaller.clear()
+        persist_save()
         await reply("🔄 Reset tamamlandı.")
 
     # ── Dashboard
@@ -1006,8 +1021,7 @@ async def handle_button(update, ctx):
         msg = (
             "-- WARREN DASHBOARD --\n\n"
             f"Bot: {'Aktif' if bot_active else 'Kapali'} | {get_session()}\n"
-            f"Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
-            f"W:{stats['win']} L:{stats['loss']} WR%{wr:.0f}\n"
+                f"W:{stats['win']} L:{stats['loss']} WR%{wr:.0f}\n"
             f"Son 10: {son10}\n\n"
             f"{perf}\n\nAktif:\n{aktif}"
         )
@@ -1090,13 +1104,6 @@ async def cmd_durum(update, ctx):
         f"Sinyal   : {stats['total']}  WR: %{wr:.1f}\n"
         f"Son Analiz: {last_daily_analiz or 'Henüz yok'}"
     )
-
-async def cmd_fiyat(update, ctx):
-    lines = ["=== FİYATLAR ==="]
-    for symbol, cfg in SYMBOLS.items():
-        p = get_price(symbol)
-        lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alınamadı")
-    await update.message.reply_text("\n".join(lines))
 
 async def cmd_analiz(update, ctx):
     symbol = (ctx.args[0].upper() if ctx.args else "XAU/USD")
@@ -1183,12 +1190,13 @@ async def cmd_kapat(update, ctx):
     await update.message.reply_text("⛔ Bot durduruldu.")
 
 async def cmd_reset(update, ctx):
-    global stats, stats_per_symbol, results_history, daily_trade_count, daily_trade_date, last_signal_time
+    global stats, stats_per_symbol, results_history, last_signal_time
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("Yetkin yok."); return
     stats = {"total": 0, "win": 0, "loss": 0}
     stats_per_symbol = {s: {"total": 0, "win": 0, "loss": 0} for s in SYMBOLS}
-    results_history = []; daily_trade_count = 0; daily_trade_date = None; last_signal_time = {}
+    results_history = []; last_signal_time = {}; aktif_sinyaller.clear()
+    persist_save()
     await update.message.reply_text("🔄 Reset tamamlandı.")
 
 async def cmd_dashboard(update, ctx):
@@ -1208,7 +1216,6 @@ async def cmd_dashboard(update, ctx):
     await update.message.reply_text(
         "-- WARREN DASHBOARD --\n\n"
         f"Bot: {'Aktif' if bot_active else 'Kapali'} | {get_session()}\n"
-        f"Trade: {daily_trade_count}/{MAX_DAILY_TRADES}\n\n"
         f"Toplam: {stats['total']} W:{stats['win']} L:{stats['loss']} WR%{wr:.1f}\n"
         f"Son 10: {son10}\n\n"
         f"{perf}\n\nAktif:\n{aktif}\n\n"
@@ -1235,27 +1242,13 @@ async def cmd_takvim(update, ctx):
     mesaj = format_takvim_mesaji(events, tarih)
     await update.message.reply_text(mesaj)
 
-async def cmd_favori(update, ctx):
-    global favori_semboller
-    if not is_admin(update.effective_user.id): return
-    if not ctx.args:
-        mevcut = ", ".join(SYMBOLS.get(s, {}).get("name", s) for s in favori_semboller)
-        await update.message.reply_text(f"Favori: {mevcut}"); return
-    yeni = set()
-    for a in ctx.args:
-        k = a.upper().replace("/", "")
-        if k in ("XAUUSD", "GOLD"):        yeni.add("XAU/USD")
-        elif k in ("QQQ","US100","NAS100"): yeni.add("QQQ")
-        elif k in ("XAGUSD","SILVER"):      yeni.add("XAG/USD")
-        elif k in ("BTCUSD","BTC"):         yeni.add("BTC/USD")
-    favori_semboller = yeni if yeni else set(SYMBOLS.keys())
-    await update.message.reply_text(f"Favori: {', '.join(SYMBOLS.get(s,{}).get('name',s) for s in favori_semboller)}")
+
 
 async def cmd_alarm(update, ctx):
     if not ctx.args or len(ctx.args) < 3:
         await update.message.reply_text("Kullanım: /alarm SEMBOL FİYAT ust|alt"); return
     sym = ctx.args[0].upper().replace("/","")
-    sym_map = {"XAUUSD":"XAU/USD","QQQ":"QQQ","XAGUSD":"XAG/USD","BTCUSD":"BTC/USD"}
+    sym_map = {"XAUUSD":"XAU/USD","QQQ":"QQQ","BTCUSD":"BTC/USD"}
     sym = sym_map.get(sym, sym)
     if sym not in SYMBOLS:
         await update.message.reply_text("Geçersiz sembol."); return
@@ -1298,7 +1291,7 @@ async def cmd_equity(update, ctx):
 async def cmd_backtest(update, ctx):
     args   = ctx.args
     symbol = args[0].upper() if args else "XAU/USD"
-    sym_map= {"XAUUSD":"XAU/USD","US100":"QQQ","NAS100":"QQQ","BTCUSD":"BTC/USD","XAGUSD":"XAG/USD"}
+    sym_map= {"XAUUSD":"XAU/USD","US100":"QQQ","NAS100":"QQQ","BTCUSD":"BTC/USD"}
     symbol = sym_map.get(symbol, symbol)
     if symbol not in SYMBOLS:
         await update.message.reply_text(f"Geçersiz. Seçenekler: {', '.join(SYMBOLS)}"); return
@@ -1487,6 +1480,7 @@ async def cmd_pnl_ekle(update, ctx):
         kayit = {"sembol":sembol,"yon":yon,"giris":giris,"cikis":cikis,
                  "lot":lot,"pnl":round(pnl,2),"tarih":datetime.utcnow().strftime("%Y-%m-%d %H:%M"),"sebep":sebep}
         pnl_db.setdefault(uid, []).append(kayit)
+        persist_save()
         await update.message.reply_text(
             f"{'✅' if pnl>0 else '❌'} Kaydedildi\n"
             f"{sembol} {yon} | {giris}→{cikis} | Lot:{lot} | P/L: ${pnl:+.2f}"
@@ -1527,34 +1521,44 @@ async def cmd_pnl_sifirla(update, ctx):
 # ── TP/SL TAKİPÇİSİ ─────────────────────────────────────────
 
 async def check_tp_sl(app):
+    """
+    Mum high/low ile TP/SL kontrolü — anlık fiyattan daha güvenilir.
+    Son kapanan mumu alır, direction'a göre h veya l'yi kontrol eder.
+    """
     global aktif_sinyaller, stats_per_symbol, results_history
     kapatilacak = []
-    for symbol, sig in aktif_sinyaller.items():
-        price = get_price(symbol)
-        if not price: continue
+    for symbol, sig in list(aktif_sinyaller.items()):
+        cfg = SYMBOLS.get(symbol, {})
+        df  = get_candles(symbol, cfg.get("interval", "1min"), 3)
+        if df is None or len(df) < 1:
+            continue
+        # Son kapanan mum (en son indeks = en yeni, tersine çevrilmiş)
+        last = df.iloc[-1]
+        high, low = float(last["h"]), float(last["l"])
         direction = sig["direction"]; tp = sig["tp"]; sl = sig["sl"]
         hit = None
         if direction == "LONG":
-            if price >= tp: hit = "TP"
-            elif price <= sl: hit = "SL"
+            if high >= tp:  hit = "TP"
+            elif low <= sl: hit = "SL"
         else:
-            if price <= tp: hit = "TP"
-            elif price >= sl: hit = "SL"
+            if low <= tp:    hit = "TP"
+            elif high >= sl: hit = "SL"
         if hit:
-            if hit == "TP": stats["win"] += 1; results_history.append("W")
+            if hit == "TP": stats["win"] += 1;  results_history.append("W")
             else:           stats["loss"] += 1; results_history.append("L")
             if len(results_history) > 50: results_history[:] = results_history[-50:]
             stats_per_symbol.setdefault(symbol, {"total":0,"win":0,"loss":0})
             stats_per_symbol[symbol]["total"] += 1
             if hit == "TP": stats_per_symbol[symbol]["win"] += 1
             else:           stats_per_symbol[symbol]["loss"] += 1
+            price_ref = tp if hit == "TP" else sl
             try:
                 await app.bot.send_message(
                     chat_id=TG_CHAT_ID,
                     text=(
                         f"{'✅' if hit=='TP' else '❌'} {hit} HIT\n"
                         f"{SYMBOLS.get(symbol,{}).get('name',symbol)} {direction}\n"
-                        f"Giriş:{sig['entry']:.2f} → Kapanış:{price:.2f}\n"
+                        f"Giriş:{sig['entry']:.2f} → {'TP' if hit=='TP' else 'SL'}:{price_ref:.2f}\n"
                         f"Toplam: {stats['total']} W:{stats['win']} L:{stats['loss']}"
                     )
                 )
@@ -1563,6 +1567,8 @@ async def check_tp_sl(app):
             kapatilacak.append(symbol)
     for s in kapatilacak:
         aktif_sinyaller.pop(s, None)
+    if kapatilacak:
+        persist_save()
 
 
 # ── KILL ZONE BİLDİRİMİ ──────────────────────────────────────
@@ -1644,9 +1650,8 @@ async def check_economic_calendar(app):
     gonderilen_takvim_uyarilari = {k for k in gonderilen_takvim_uyarilari if k.endswith(bugun)}
 
     olaylar = get_economic_calendar_api()
-    if olaylar is None:
-        # FMP yoksa statik fallback (yalnızca 30dk uyarısı için)
-        olaylar = [o for o in EKONOMIK_OLAYLAR if o.get("gun",-1) == -1 or o.get("gun") == now_utc.weekday()]
+    if not olaylar:
+        return  # Veri yoksa uyarı göndermek yerine sessiz geç
 
     # ── Sabah özeti: 06:00 UTC (09:00 TR) - bir kez gönder
     sabah_key = f"sabah_ozet_{bugun}"
@@ -1701,13 +1706,13 @@ async def check_economic_calendar(app):
 # ── MAIN ────────────────────────────────────────────────────
 
 async def main():
+    persist_load()  # Render restart sonrası state geri yükle
     app = Application.builder().token(TG_TOKEN).build()
 
     handlers = [
         ("start",       cmd_start),
         ("komutlar",    cmd_komutlar),
         ("durum",       cmd_durum),
-        ("fiyat",       cmd_fiyat),
         ("analiz",      cmd_analiz),
         ("istatistik",  cmd_istatistik),
         ("sinyal",      cmd_sinyal),
@@ -1718,7 +1723,6 @@ async def main():
         ("reset",       cmd_reset),
         ("dashboard",   cmd_dashboard),
         ("takvim",      cmd_takvim),
-        ("favori",      cmd_favori),
         ("alarm",       cmd_alarm),
         ("seans",       cmd_seans),
         ("equity",      cmd_equity),
