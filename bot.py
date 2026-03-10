@@ -11,9 +11,7 @@ import os
 import io
 import logging
 import asyncio
-import threading
 from datetime import datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import requests
 import pandas as pd
@@ -29,12 +27,13 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 log = logging.getLogger(__name__)
 
 # ── AYARLAR ─────────────────────────────────────────────────
-TG_TOKEN      = os.environ.get("TG_TOKEN",      "8698295551:AAFLixj0p8t7REyHcIkXnSp0gChNf6bNk6w")
+TG_TOKEN      = os.environ.get("TG_TOKEN")
 TG_CHAT_ID    = os.environ.get("TG_CHAT_ID",    "-1003838635441")
 TD_API_KEY    = os.environ.get("TD_API_KEY",    "YOUR_TWELVEDATA_KEY")
 CLAUDE_API_KEY= os.environ.get("CLAUDE_API_KEY","YOUR_CLAUDE_KEY")
 FMP_API_KEY   = os.environ.get("FMP_API_KEY",  "")  # financialmodelingprep.com - ucretsiz key
 ADMIN_IDS     = [6663913960]
+PORT          = int(os.environ.get("PORT", "8080"))
 
 SYMBOLS = {
     "XAU/USD":  {"name": "XAUUSD",  "interval": "1min", "htf": "15min", "pip_val": 100},
@@ -86,6 +85,9 @@ gonderilen_takvim_uyarilari = set()  # Tekrar gonderimi onlemek icin
 son_kz_durum = None  # Son Kill Zone durumu (acilis/kapanis tekrarini onlemek icin)
 _takvim_api_cache = {"date": None, "events": []}  # API cache (1 saat)
 _htf_cache = {}  # {symbol: (timestamp, df)} - Twelve Data 8/dk limit icin HTF 15dk cache
+
+if not TG_TOKEN:
+    raise RuntimeError("TG_TOKEN ortam degiskeni zorunlu. Lutfen env'e ekleyin.")
 
 # ── EKONOMİK TAKVİM API ──────────────────────────────────────
 def get_economic_calendar_api():
@@ -143,16 +145,6 @@ def get_economic_calendar_api():
         log.warning(f"Takvim API hatasi: {ex}")
         return None
 
-# ── KEEP ALIVE ───────────────────────────────────────────────
-class KeepAlive(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers()
-        self.wfile.write(b"Warren Bot V4 caliyor!")
-    def log_message(self, *a): pass
-
-def start_server():
-    HTTPServer(("0.0.0.0", 8080), KeepAlive).serve_forever()
-
 # ── TWELVE DATA ──────────────────────────────────────────────
 def get_candles(symbol, interval="1min", outputsize=50):
     try:
@@ -207,13 +199,28 @@ def get_htf_cached(symbol, interval="15min", outputsize=30):
         _htf_cache[key] = (now, df)
     return df
 
+async def aget_candles(symbol, interval="1min", outputsize=50):
+    return await asyncio.to_thread(get_candles, symbol, interval, outputsize)
+
+async def aget_price(symbol):
+    return await asyncio.to_thread(get_price, symbol)
+
+async def aget_daily_candles(symbol, outputsize=30):
+    return await asyncio.to_thread(get_daily_candles, symbol, outputsize)
+
+async def aget_htf_cached(symbol, interval="15min", outputsize=30):
+    return await asyncio.to_thread(get_htf_cached, symbol, interval, outputsize)
+
+async def aget_economic_calendar_api():
+    return await asyncio.to_thread(get_economic_calendar_api)
+
 # ── CLAUDE AI - GUNLUK ANALİZ ───────────────────────────────
-def get_market_context():
+async def get_market_context():
     """Claude'a verilecek piyasa verilerini hazirla"""
     context = {}
     for symbol in ["XAU/USD", "QQQ", "XAG/USD"]:
-        price = get_price(symbol)
-        daily = get_daily_candles(symbol, 10)
+        price = await aget_price(symbol)
+        daily = await aget_daily_candles(symbol, 10)
         if price and daily is not None:
             son5 = daily.tail(5)
             highs = son5["h"].values
@@ -339,19 +346,45 @@ Neden? [3 sebep]
         log.error(f"Claude API istegi hatasi: {e}")
         return None
 
+def _fetch_haber_analysis(prompt):
+    if not CLAUDE_API_KEY or CLAUDE_API_KEY == "YOUR_CLAUDE_KEY":
+        return None
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": CLAUDE_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=30
+        )
+        data = r.json()
+        if "content" in data and data["content"]:
+            return data["content"][0]["text"]
+        log.error(f"Haber analizi API hatasi: {data}")
+        return None
+    except Exception as e:
+        log.error(f"Haber analizi istegi hatasi: {e}")
+        return None
+
 async def send_daily_analysis(app):
     """Sabah 09:00 TR saatinde gunluk analiz gonder"""
     global last_daily_analiz
     log.info("Gunluk analiz gonderiliyor...")
-
-    context = get_market_context()
+    context = await get_market_context()
     if not context:
         await app.bot.send_message(chat_id=TG_CHAT_ID, text="Gunluk analiz icin veri alinamadi.")
         return
 
     # Her sembol icin ayri analiz
     for symbol_display in ["XAUUSD (Gold)", "NAS100 (QQQ)"]:
-        analysis = generate_daily_analysis(symbol_display, context)
+        analysis = await asyncio.to_thread(generate_daily_analysis, symbol_display, context)
         if analysis:
             # Telegram 4096 karakter limiti - uzunsa bolu
             if len(analysis) > 4000:
@@ -456,7 +489,7 @@ async def scan_loop(app):
         dakika   = now_tr.minute
 
         # Sabah 09:00 TR saatinde gunluk analiz gonder (haftaici)
-        if (saat == 9 and dakika == 0 and
+        if (saat == 9 and 0 <= dakika < 10 and
             now_tr.weekday() < 5 and
             last_daily_analiz != bugun):
             await send_daily_analysis(app)
@@ -469,7 +502,7 @@ async def scan_loop(app):
 
         # Fiyat alarmlari
         for al in list(fiyat_alarmlari):
-            p = get_price(al["sembol"])
+            p = await aget_price(al["sembol"])
             if p is None: continue
             tetik = False
             if al["yon"] == "ust" and p >= al["hedef"]: tetik = True
@@ -485,23 +518,26 @@ async def scan_loop(app):
                 except: pass
 
         # Gunluk ozet (09:05 TR)
-        if (saat == 9 and dakika == 5 and now_tr.weekday() < 5 and last_daily_summary != bugun):
+        if (saat == 9 and 5 <= dakika < 15 and now_tr.weekday() < 5 and last_daily_summary != bugun):
             await send_daily_summary(app)
             last_daily_summary = bugun
 
         # Haftalik ozet (Cuma 18:00 TR)
-        if (saat == 18 and dakika == 0 and now_tr.weekday() == 4 and last_weekly_summary != bugun):
+        if (saat == 18 and 0 <= dakika < 10 and now_tr.weekday() == 4 and last_weekly_summary != bugun):
             await send_weekly_summary(app)
             last_weekly_summary = bugun
 
         # TP/SL takip
         if aktif_sinyaller:
             await check_tp_sl(app)
+
+        if not bot_active:
+            continue
         if not is_market_open():
             continue
 
         # Sadece Kill Zone'da trade
-        if not is_kill_zone():
+        if kill_zone_only and not is_kill_zone():
             continue
 
         # Gunluk trade limiti reset
@@ -522,9 +558,9 @@ async def scan_loop(app):
                 last = last_signal_time.get(symbol)
                 if last and (datetime.utcnow() - last).seconds < COOLDOWN_MIN * 60:
                     continue
-                df_ltf = get_candles(symbol, cfg["interval"], 50)
+                df_ltf = await aget_candles(symbol, cfg["interval"], 50)
                 await asyncio.sleep(2)  # API limit: 8/dk - istekleri yay
-                df_htf = get_htf_cached(symbol, cfg.get("htf", "15min"), 30)
+                df_htf = await aget_htf_cached(symbol, cfg.get("htf", "15min"), 30)
                 await asyncio.sleep(2)
                 sig = analyze_ict(df_ltf, df_htf)
                 if sig:
@@ -734,8 +770,8 @@ async def handle_button(update, ctx):
             return
         cfg = SYMBOLS[sym]
         await reply(f"{sym} analiz ediliyor...")
-        df_ltf = get_candles(sym, cfg["interval"], 50)
-        df_htf = get_candles(sym, cfg.get("htf", "15min"), 30)
+        df_ltf = await aget_candles(sym, cfg["interval"], 50)
+        df_htf = await aget_candles(sym, cfg.get("htf", "15min"), 30)
         if df_ltf is None:
             await reply("Veri alinamadi.")
             return
@@ -747,7 +783,7 @@ async def handle_button(update, ctx):
     elif cmd == "fiyat":
         lines = ["=== FIYATLAR ==="]
         for symbol, cfg in SYMBOLS.items():
-            p = get_price(symbol)
+            p = await aget_price(symbol)
             lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
         await reply("\n".join(lines))
     elif cmd == "sinyal":
@@ -755,7 +791,7 @@ async def handle_button(update, ctx):
         last_signal_time.clear()
         found = False
         for symbol, cfg in SYMBOLS.items():
-            df = get_candles(symbol, cfg["interval"], 50)
+            df = await aget_candles(symbol, cfg["interval"], 50)
             sig = analyze_ict(df)
             if sig:
                 await reply(format_signal(symbol, sig))
@@ -839,22 +875,15 @@ async def handle_button(update, ctx):
             await reply(f"Grafik hatasi: {e}")
     elif cmd == "haber":
         await reply("📰 Haberler analiz ediliyor...")
+        prompt = (
+            f"Tarih: {(datetime.utcnow() + timedelta(hours=3)).strftime('%d %B %Y %H:%M')} TR\n\n"
+            "Piyasalari etkileyen guncel haberleri degerlendir. XAU/USD ve NAS100 icin:\n"
+            "1. Genel sentiment (Bullish/Bearish/Notr)\n2. Risk faktorleri\n3. Kisa vadeli firsat/tehdit\nKisa yaz."
+        )
         try:
-            r = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": CLAUDE_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={
-                    "model": "claude-sonnet-4-20250514", "max_tokens": 800,
-                    "messages": [{"role": "user", "content": (
-                        f"Tarih: {(datetime.utcnow() + timedelta(hours=3)).strftime('%d %B %Y %H:%M')} TR\n\n"
-                        "Piyasalari etkileyen guncel haberleri degerlendir. XAU/USD ve NAS100 icin:\n"
-                        "1. Genel sentiment (Bullish/Bearish/Notr)\n2. Risk faktorleri\n3. Kisa vadeli firsat/tehdit\nKisa yaz."
-                    )}]
-                }, timeout=30
-            )
-            data = r.json()
-            if "content" in data and data["content"]:
-                await reply(f"📰 Haber Analizi\n\n{data['content'][0]['text']}")
+            analiz = await asyncio.to_thread(_fetch_haber_analysis, prompt)
+            if analiz:
+                await reply(f"📰 Haber Analizi\n\n{analiz}")
             else:
                 await reply("Haber analizi alinamadi.")
         except Exception as e:
@@ -879,7 +908,7 @@ async def cmd_durum(update, ctx):
 async def cmd_fiyat(update, ctx):
     lines = ["=== FIYATLAR ==="]
     for symbol, cfg in SYMBOLS.items():
-        p = get_price(symbol)
+        p = await aget_price(symbol)
         lines.append(f"{cfg['name']:8}: {p:.4f}" if p else f"{cfg['name']:8}: Alinamadi")
     await update.message.reply_text("\n".join(lines))
 
@@ -889,8 +918,8 @@ async def cmd_analiz(update, ctx):
         await update.message.reply_text(f"Gecersiz. Secenekler: {', '.join(SYMBOLS)}"); return
     cfg = SYMBOLS[symbol]
     await update.message.reply_text(f"{symbol} analiz ediliyor (LTF: {cfg['interval']} + HTF: {cfg.get('htf','15min')})...")
-    df_ltf = get_candles(symbol, cfg["interval"], 50)
-    df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+    df_ltf = await aget_candles(symbol, cfg["interval"], 50)
+    df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
     if df_ltf is None:
         await update.message.reply_text("Veri alinamadi."); return
     sig = analyze_ict(df_ltf, df_htf)
@@ -916,8 +945,8 @@ async def cmd_sinyal(update, ctx):
     await update.message.reply_text(f"Taranıyor: {', '.join(scan_symbols.keys())}...")
     last_signal_time = {}; found = False
     for symbol, cfg in scan_symbols.items():
-        df_ltf = get_candles(symbol, cfg["interval"], 50)
-        df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+        df_ltf = await aget_candles(symbol, cfg["interval"], 50)
+        df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
         sig = analyze_ict(df_ltf, df_htf)
         if sig:
             txt = format_signal(symbol, sig)
@@ -944,18 +973,35 @@ async def cmd_kapat(update, ctx):
     bot_active = False; await update.message.reply_text("Bot durduruldu. /ac ile baslatabilirsin.")
 
 # ── GRUP YÖNETİMİ ────────────────────────────────────────────
-async def get_target(update, ctx):
+async def get_target(update, ctx, user_token=None):
     if update.message.reply_to_message:
         return update.message.reply_to_message.from_user
-    if ctx.args:
-        username = ctx.args[0].lstrip("@")
+
+    token = user_token
+    if token is None and ctx.args:
+        token = ctx.args[0]
+    if token:
+        token = token.lstrip("@")
+        if token.isdigit():
+            uid = int(token)
+            try:
+                member = await ctx.bot.get_chat_member(update.effective_chat.id, uid)
+                return member.user
+            except:
+                await update.message.reply_text(f"Kullanici bulunamadi: {uid}")
+                return None
         try:
-            member = await ctx.bot.get_chat_member(update.effective_chat.id, username)
-            return member.user
+            chat = await ctx.bot.get_chat(f"@{token}")
+            try:
+                member = await ctx.bot.get_chat_member(update.effective_chat.id, chat.id)
+                return member.user
+            except:
+                return chat
         except:
-            await update.message.reply_text(f"Kullanici bulunamadi: @{username}")
+            await update.message.reply_text(f"Kullanici bulunamadi: @{token}")
             return None
-    await update.message.reply_text("Kullanici belirt: reply yap veya @username yaz.")
+
+    await update.message.reply_text("Kullanici belirt: reply yap veya @username ya da user id yaz.")
     return None
 
 async def cmd_kick(update, ctx):
@@ -988,16 +1034,30 @@ async def cmd_unban(update, ctx):
 
 async def cmd_mute(update, ctx):
     if not is_admin(update.effective_user.id): return
-    t = await get_target(update, ctx)
+    dakika = 10
+    token = None
+
+    if update.message.reply_to_message:
+        if ctx.args and ctx.args[0].isdigit():
+            dakika = int(ctx.args[0])
+    else:
+        if ctx.args:
+            if ctx.args[-1].isdigit():
+                dakika = int(ctx.args[-1])
+                if len(ctx.args) > 1:
+                    token = ctx.args[0]
+            else:
+                token = ctx.args[0]
+
+    t = await get_target(update, ctx, token)
     if not t: return
-    dk = int(ctx.args[0]) if ctx.args else 10
     try:
         await ctx.bot.restrict_chat_member(
             update.effective_chat.id, t.id,
             permissions=ChatPermissions(can_send_messages=False),
-            until_date=datetime.utcnow() + timedelta(minutes=dk)
+            until_date=datetime.utcnow() + timedelta(minutes=dakika)
         )
-        await update.message.reply_text(f"{t.first_name} {dk}dk susturuldu.")
+        await update.message.reply_text(f"{t.first_name} {dakika}dk susturuldu.")
     except Exception as e: await update.message.reply_text(f"Hata: {e}")
 
 async def cmd_unmute(update, ctx):
@@ -1273,7 +1333,7 @@ async def cmd_dashboard(update, ctx):
     aktif_lines = []
     for sym, s in aktif_sinyaller.items():
         name = SYMBOLS.get(sym, {}).get("name", sym)
-        p = get_price(sym)
+        p = await aget_price(sym)
         if p:
             pnl_pips = abs(p - s["entry"])
             emoji = "🟢" if (s["direction"] == "LONG" and p > s["entry"]) or (s["direction"] == "SHORT" and p < s["entry"]) else "🔴"
@@ -1308,44 +1368,35 @@ async def cmd_dashboard(update, ctx):
         f"━━━ AYARLAR ━━━\n"
         f"Min RR: 1:{MIN_RR} | Min Conf: {MIN_CONFLUENCE}/6\n"
         f"Risk: %{RISK_PER_TRADE*100:.0f}/trade | Max: %{MAX_DAILY_RISK*100:.0f}/gun\n"
-        f"Kill Zone Only: Evet"
+        f"Kill Zone Only: {'Evet' if kill_zone_only else 'Hayir'}"
     )
     await update.message.reply_text(txt)
 
 # ── HABER SENTİMENT ANALİZİ ─────────────────────────────────
 async def cmd_haber(update, ctx):
-    """Deepseek ile gold/nas haber sentiment analizi"""
+    """Haber sentiment analizi"""
     await update.message.reply_text("📰 Haberler analiz ediliyor...")
 
+    now_tr = datetime.utcnow() + timedelta(hours=3)
+    prompt = (
+        f"Tarih: {now_tr.strftime('%d %B %Y %H:%M')} TR saati\n\n"
+        "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
+        "XAU/USD (Gold) ve NAS100 için:\n"
+        "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
+        "2. Risk faktörleri\n"
+        "3. Kısa vadeli fırsat/tehdit\n\n"
+        "Kısa ve ICT perspektifinden yorum yap."
+    )
+
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-
-        now_tr = datetime.utcnow() + timedelta(hours=3)
-        tarih = now_tr.strftime("%d %B %Y %H:%M")
-
-        mesaj = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Tarih: {tarih} TR saati\n\n"
-                    "Şu an piyasaları etkileyen güncel haberleri ve makroekonomik ortamı değerlendir. "
-                    "XAU/USD (Gold) ve NAS100 için:\n"
-                    "1. Genel piyasa sentiment'i (Bullish/Bearish/Nötr)\n"
-                    "2. Risk faktörleri\n"
-                    "3. Kısa vadeli fırsat/tehdit\n\n"
-                    "Kısa ve ICT perspektifinden yorum yap."
-                )
-            }]
-        )
-        analiz = mesaj.content[0].text
-        await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+        analiz = await asyncio.to_thread(_fetch_haber_analysis, prompt)
+        if analiz:
+            await update.message.reply_text(f"📰 *Haber Sentiment Analizi*\n\n{analiz}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("Haber analizi alinamadi.")
     except Exception as e:
         await update.message.reply_text(f"❌ Hata: {e}")
 
-# ── EKONOMİK TAKVİM ─────────────────────────────────────────
 async def cmd_takvim(update, ctx):
     """Bugunun onemli ekonomik olaylarini goster"""
     now_utc = datetime.utcnow()
@@ -1367,7 +1418,7 @@ async def check_tp_sl(app):
     kapatilacak = []
 
     for symbol, sig in aktif_sinyaller.items():
-        price = get_price(symbol)
+        price = await aget_price(symbol)
         if not price:
             continue
 
@@ -1447,8 +1498,8 @@ async def cmd_backtest(update, ctx):
     await update.message.reply_text(f"⏳ {symbol} icin backtest calisiyor... (100 mum)")
 
     try:
-        df = get_candles(symbol, "1min", 100)
-        df_htf = get_candles(symbol, cfg.get("htf", "15min"), 30)
+        df = await aget_candles(symbol, "1min", 100)
+        df_htf = await aget_candles(symbol, cfg.get("htf", "15min"), 30)
         if df is None or len(df) < 30:
             await update.message.reply_text("❌ Veri alinamadi.")
             return
@@ -1623,8 +1674,7 @@ async def check_economic_calendar(app):
 
     # Eski gunlerin kayitlarini temizle
     gonderilen_takvim_uyarilari = {k for k in gonderilen_takvim_uyarilari if k.endswith(bugun)}
-
-    olaylar = get_economic_calendar_api()
+    olaylar = await aget_economic_calendar_api()
     if olaylar is None:
         # API yok/hatali - static fallback (sadece gun kontrolu)
         olaylar = [o for o in EKONOMIK_OLAYLAR if o.get("gun", -1) == -1 or o.get("gun") == now_utc.weekday()]
@@ -1660,7 +1710,6 @@ async def check_economic_calendar(app):
 
 # ── MAIN ────────────────────────────────────────────────────
 async def main():
-    threading.Thread(target=start_server, daemon=True).start()
 
     app = Application.builder().token(TG_TOKEN).build()
 
@@ -1708,12 +1757,32 @@ async def health_server():
     app.router.add_get("/", health)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    log.info("Health server started on port 8080")
+    log.info(f"Health server started on port {PORT}")
 
 async def run_all():
     await asyncio.gather(health_server(), main())
 
 if __name__ == "__main__":
     asyncio.run(run_all())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
